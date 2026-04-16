@@ -18,7 +18,7 @@ services:
       # ----------------------------------------
       # Gemini 配置
       # ----------------------------------------
-      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://aihubmix.com}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://xxx.com}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-free}
 
       # ----------------------------------------
