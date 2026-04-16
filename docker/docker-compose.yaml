@@ -1,0 +1,50 @@
+services:
+  epic-gamer-gemini:
+    image: akapzg/epic-gamer-gemini:latest
+    restart: always
+    container_name: epic-gamer-gemini
+    
+    environment:
+      - TZ=Asia/Shanghai
+
+      # ----------------------------------------
+      # 核心账号配置 (优先从 .env 读取)
+      # ----------------------------------------
+      - EPIC_EMAIL=${EPIC_EMAIL}
+      - EPIC_PASSWORD=${EPIC_PASSWORD}
+      - BARK_URL=${BARK_URL}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+
+      # ----------------------------------------
+      # Gemini 配置
+      # ----------------------------------------
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://aihubmix.com}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-free}
+
+      # ----------------------------------------
+      # 运行参数
+      # ----------------------------------------
+      - ENABLE_APSCHEDULER=true
+      
+      - DISABLE_BEZIER_TRAJECTORY=true
+      - EXECUTION_TIMEOUT=120
+      - RESPONSE_TIMEOUT=30
+      - RETRY_ON_FAILURE=true
+      - WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS=1500
+      - CONSTRAINT_RESPONSE_SCHEMA=true
+      - CHALLENGE_CLASSIFIER_MODEL=${CHALLENGE_CLASSIFIER_MODEL:-gemini-3-flash-preview}
+      - IMAGE_CLASSIFIER_MODEL=${IMAGE_CLASSIFIER_MODEL:-gemini-2.5-pro}
+      - SPATIAL_POINT_REASONER_MODEL=${SPATIAL_POINT_REASONER_MODEL:-gemini-2.5-pro}
+      - SPATIAL_PATH_REASONER_MODEL=${SPATIAL_PATH_REASONER_MODEL:-gemini-2.5-pro}
+      - IMAGE_CLASSIFIER_THINKING_BUDGET=970
+      - SPATIAL_POINT_THINKING_BUDGET=1387
+      - SPATIAL_PATH_THINKING_BUDGET=1652
+
+    volumes:
+      - "./volumes/:/app/app/volumes/"
+
+    mem_limit: 4g
+    shm_size: '2gb'
+
+    env_file:
+      - ../.env
