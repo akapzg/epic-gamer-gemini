@@ -1,10 +1,10 @@
 name: Build and Publish Docker Image
 
 on:
-  push:
-    branches: [ "main", "master" ]
-    tags: [ 'v*.*.*' ]
   workflow_dispatch:
+  # (可选) 你也可以保留 Tag 触发，方便发布正式版本
+  # push:
+  #   tags: [ 'v*.*.*' ]
 
 env:
   # 替换为你的 DockerHub 用户名和仓库名
