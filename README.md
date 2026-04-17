@@ -21,6 +21,10 @@
 
 **Epic Awesome Gamer (Gemini 版)** 是一款高度定制的自动化领取工具。它在原版基础上针对 **Gemini AI** 进行了深度优化，能够通过 AI 视觉识别完美绕过 hCaptcha 验证码，并支持多架构（x86/ARM64）部署。
 
+本项目基于原作者 [**QIN2DIM/epic-awesome-gamer**](https://github.com/QIN2DIM/epic-awesome-gamer) 进行及其他二次开发的基础上，进一步优化和修复相关bug。在此特别感谢的开源贡献！
+
+支持 [**Finb/Bark**](https://github.com/Finb/Bark)推送领取成功消息
+
 ---
 
 ## ✨ Gemini 版核心特性
