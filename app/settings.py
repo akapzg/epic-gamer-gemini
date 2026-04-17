@@ -20,8 +20,8 @@ SCREENSHOTS_DIR = VOLUMES_DIR.joinpath("screenshots")
 RECORD_DIR = VOLUMES_DIR.joinpath("record")
 HCAPTCHA_DIR = VOLUMES_DIR.joinpath("hcaptcha")
 
-# 获取用户设置的 Master 模型名，默认使用 gemini-2.0-flash-free
-_MASTER_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-free")
+# 获取用户设置的 Master 模型名，默认使用 gemini-2.5-pro
+_MASTER_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
 # === 配置类定义 ===
 class EpicSettings(AgentConfig):
@@ -41,7 +41,7 @@ class EpicSettings(AgentConfig):
     )
     
     GEMINI_BASE_URL: str = Field(
-        default=os.getenv("GEMINI_BASE_URL", "https://aihubmix.com"),
+        default=os.getenv("GEMINI_BASE_URL", "https://xxx.com"),
         description="中转地址",
     )
     
