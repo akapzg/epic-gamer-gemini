@@ -60,23 +60,13 @@ CHALLENGE_CLASSIFIER_MODEL=gemini-3-flash-preview
 
 ### 3. 一键构建与启动
 ```bash
-# 执行构建脚本
-chmod +x setup.sh
-./setup.sh
-
-# 启动容器
-cd docker
-docker compose up -d
+docker/docker-compose.yaml
 ```
 
 ---
 
 ## 🛠️ 运维与调试
 
-### 查看日志
-```bash
-docker logs -f epic-gamer-gemini
-```
 
 ### 调试截图
 程序会自动将截图保存至 `./docker/volumes/screenshots/`。如果你发现游戏“领取成功”但库里没有，请通过截图排查原因。
