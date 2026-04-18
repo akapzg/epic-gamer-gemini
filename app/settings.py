@@ -75,7 +75,7 @@ settings = EpicSettings()
 settings.ignore_request_questions = ["Please drag the crossing to complete the lines"]
 
 # ========================= 处理中转解析与多图冲突 =========================
-def _apply_aihubmix_patch():
+def _apply_gemini_proxy_patch():
     if not settings.GEMINI_API_KEY:
         return
 
@@ -152,4 +152,4 @@ def _apply_aihubmix_patch():
         logger.error(f"❌ 严重：补丁框架启动失败! 原因: {e}")
 
 # 执行补丁
-_apply_aihubmix_patch()
+_apply_gemini_proxy_patch()
