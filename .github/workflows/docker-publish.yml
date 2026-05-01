@@ -45,7 +45,7 @@ jobs:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=true
-            type=match,pattern=v(.*),group=1
+            type=semver,pattern={{version}}
             type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event.inputs.version != '' }}
 
       - name: Build and push Docker image
