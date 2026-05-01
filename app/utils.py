@@ -40,7 +40,7 @@ async def send_bark_notification(title: str, body: str):
                 "title": title,
                 "body": f"账号: {settings.EPIC_EMAIL}\n{body}",
                 "group": "epic-gamer",
-                "icon": "https://www.google.com/s2/favicons?sz=128&domain=epicgames.com"
+                "icon": "https://raw.githubusercontent.com/akapzg/epic-gamer-gemini/main/Epicgames_A.png"
             }
             # 按照官方文档推荐，使用 JSON 格式发送
             resp = await client.post(bark_url, json=payload)
