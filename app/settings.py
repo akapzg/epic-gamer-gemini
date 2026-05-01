@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
 import asyncio
 from pathlib import Path
 
@@ -75,14 +74,23 @@ settings = EpicSettings()
 settings.ignore_request_questions = ["Please drag the crossing to complete the lines"]
 
 # ========================= 处理中转解析与多图冲突 =========================
+import uuid as _uuid
+
+# 重复挂载保护：确保 patch 只被执行一次
+_patch_applied = False
+
 def _apply_gemini_proxy_patch():
+    global _patch_applied
+    if _patch_applied:
+        logger.debug("Gemini proxy patch already applied, skipping.")
+        return
     if not settings.GEMINI_API_KEY:
         return
 
     try:
         from google import genai
         from google.genai import types
-        
+
         # 1. 劫持 Client 初始化 (自动修正中转路径)
         orig_init = genai.Client.__init__
         def new_init(self, *args, **kwargs):
@@ -90,66 +98,71 @@ def _apply_gemini_proxy_patch():
                 api_key = settings.GEMINI_API_KEY.get_secret_value()
             else:
                 api_key = str(settings.GEMINI_API_KEY)
-            
+
             kwargs['api_key'] = api_key
-            
+
             base_url = settings.GEMINI_BASE_URL.rstrip('/')
             if base_url.endswith('/v1'): base_url = base_url[:-3]
-            # if not base_url.endswith('/gemini'): base_url = f"{base_url}/gemini"
-            
+
             kwargs['http_options'] = types.HttpOptions(base_url=base_url)
-            logger.info(f"🚀 已强行同步模型变量 | 当前生效 ID: {settings.GEMINI_MODEL} | 地址: {base_url}")
+            logger.info(f"已同步模型变量 | 当前生效 ID: {settings.GEMINI_MODEL} | 地址: {base_url}")
             orig_init(self, *args, **kwargs)
-        
+
         genai.Client.__init__ = new_init
 
         # 2. 劫持文件上传与生成逻辑 (修复 400 报错与 Base64 兼容)
-        try:
-            file_cache = {}
+        # key 用 uuid4 而非 id()，避免 CPython 内存地址复用导致缓存污染
+        file_cache: dict[str, bytes] = {}
 
-            def _local_to_list(c):
-                return c if isinstance(c, list) else [c]
+        def _local_to_list(c):
+            return c if isinstance(c, list) else [c]
 
-            async def patched_upload(self_files, file, **kwargs):
-                if hasattr(file, 'read'): content = file.read()
-                elif isinstance(file, (str, Path)):
-                    with open(file, 'rb') as f: content = f.read()
-                else: content = bytes(file)
-                
-                if asyncio.iscoroutine(content): content = await content
-                
-                file_id = f"bypass_{id(content)}"
-                file_cache[file_id] = content
-                return types.File(name=file_id, uri=file_id, mime_type="image/png")
+        async def patched_upload(self_files, file, **kwargs):
+            if hasattr(file, 'read'):
+                content = file.read()
+            elif isinstance(file, (str, Path)):
+                with open(file, 'rb') as f:
+                    content = f.read()
+            else:
+                content = bytes(file)
 
-            orig_generate = genai.models.AsyncModels.generate_content
-            async def patched_generate(self_models, model, contents, **kwargs):
-                # [修正：针对多图发送时的分辨率冲突]
-                if 'config' in kwargs and kwargs['config'] is not None:
-                    if hasattr(kwargs['config'], 'media_resolution'):
-                        kwargs['config'].media_resolution = None # 剔除写死的 HIGH 分辨率
+            if asyncio.iscoroutine(content):
+                content = await content
 
-                normalized = _local_to_list(contents)
-                
-                for content in normalized:
-                    if hasattr(content, 'parts'):
-                        for i, part in enumerate(content.parts):
-                            if part.file_data and part.file_data.file_uri in file_cache:
-                                data = file_cache[part.file_data.file_uri]
-                                content.parts[i] = types.Part.from_bytes(data=data, mime_type="image/png")
-                
-                # 强制使用关键字参数确保 API 握手成功
-                return await orig_generate(self_models, model=model, contents=normalized, **kwargs)
+            # uuid4 保证每次上传的 key 唯一，不受内存地址复用影响
+            file_id = f"bypass_{_uuid.uuid4().hex}"
+            file_cache[file_id] = content
+            return types.File(name=file_id, uri=file_id, mime_type="image/png")
 
-            genai.files.AsyncFiles.upload = patched_upload
-            genai.models.AsyncModels.generate_content = patched_generate
-            logger.info("🚀 补丁成功挂载：多图写保护 + 模型 ID 动态注入已就绪")
-            
-        except Exception as ie:
-            logger.warning(f"⚠️ 文件层补丁处理异常: {ie}")
+        orig_generate = genai.models.AsyncModels.generate_content
+        async def patched_generate(self_models, model, contents, **kwargs):
+            # 清除多图时写死的 HIGH 分辨率，防止 400 报错
+            if 'config' in kwargs and kwargs['config'] is not None:
+                if hasattr(kwargs['config'], 'media_resolution'):
+                    try:
+                        delattr(kwargs['config'], 'media_resolution')
+                    except AttributeError:
+                        kwargs['config'].media_resolution = None
+
+            normalized = _local_to_list(contents)
+
+            for content in normalized:
+                if hasattr(content, 'parts'):
+                    for i, part in enumerate(content.parts):
+                        if part.file_data and part.file_data.file_uri in file_cache:
+                            data = file_cache.pop(part.file_data.file_uri)  # 用完即删，防止内存泄漏
+                            content.parts[i] = types.Part.from_bytes(data=data, mime_type="image/png")
+
+            return await orig_generate(self_models, model=model, contents=normalized, **kwargs)
+
+        genai.files.AsyncFiles.upload = patched_upload
+        genai.models.AsyncModels.generate_content = patched_generate
+
+        _patch_applied = True
+        logger.info("补丁成功挂载：中转地址注入 + 多图写保护 + Base64 内联已就绪")
 
     except Exception as e:
-        logger.error(f"❌ 严重：补丁框架启动失败! 原因: {e}")
+        logger.error(f"补丁框架启动失败: {e}")
 
 # 执行补丁
 _apply_gemini_proxy_patch()

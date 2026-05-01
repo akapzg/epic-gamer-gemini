@@ -5,6 +5,7 @@
 # Description: 游戏商城控制句柄
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 from contextlib import suppress
 from json import JSONDecodeError
@@ -169,10 +170,13 @@ class EpicAgent:
 
         if self._promotions:
             try:
-                await self.epic_games.collect_weekly_games(self._promotions)
-                # 遍历促销列表发送成功通知
-                for p in self._promotions:
-                    await send_bark_notification("Epic 游戏领取", f"《{p.title}》领取成功")
+                claimed_games = await self.epic_games.collect_weekly_games(self._promotions)
+                # 只对本次实际领取成功的游戏发送通知（已在库中的跳过）
+                if claimed_games:
+                    for p in claimed_games:
+                        await send_bark_notification("Epic 游戏领取", f"《{p.title}》领取成功")
+                else:
+                    logger.info("本次没有新领取的游戏，跳过 Bark 推送")
             except Exception as e:
                 logger.exception(e)
         
@@ -183,6 +187,34 @@ class EpicGames:
     def __init__(self, page: Page):
         self.page = page
         self._promotions: List[PromotionGame] = []
+
+    @staticmethod
+    async def _save_debug_screenshot(page: Page, name: str) -> None:
+        """保存调试截图，使用可读的 UTC 时间戳命名。"""
+        from settings import SCREENSHOTS_DIR
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = SCREENSHOTS_DIR.joinpath(f"{name}_{ts}.png")
+        with suppress(Exception):
+            await page.screenshot(path=path, full_page=True)
+            logger.debug(f"📸 Screenshot saved: {path.name}")
+
+    @staticmethod
+    def _cleanup_old_screenshots(max_age_days: int = 7) -> None:
+        """删除超过 max_age_days 天的截图，防止磁盘持续积累。"""
+        from settings import SCREENSHOTS_DIR
+        if not SCREENSHOTS_DIR.exists():
+            return
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=max_age_days)
+        removed = 0
+        for f in SCREENSHOTS_DIR.glob("*.png"):
+            mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            if mtime < cutoff:
+                with suppress(Exception):
+                    f.unlink()
+                    removed += 1
+        if removed:
+            logger.debug(f"Cleaned up {removed} screenshot(s) older than {max_age_days} days")
 
     @staticmethod
     async def _agree_license(page: Page):
@@ -228,64 +260,65 @@ class EpicGames:
                 return True
 
     async def _handle_instant_checkout(self, page: Page):
-        logger.info("🚀 Triggering Instant Checkout Flow...")
+        logger.info("Triggering Instant Checkout Flow...")
         agent = AgentV(page=page, agent_config=settings)
-        
-        # 定义截图助手
-        async def _save_debug_screenshot(name: str):
-            from settings import SCREENSHOTS_DIR
-            SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-            path = SCREENSHOTS_DIR.joinpath(f"{name}_{int(asyncio.get_event_loop().time())}.png")
-            await page.screenshot(path=path, full_page=True)
-            logger.debug(f"📸 Debug Screenshot Saved: {path}")
 
         try:
             wpc, payment_btn = await self._active_purchase_container(page)
             logger.debug(f"Clicking payment button: {await payment_btn.text_content()}")
-            
-            # 点击前截个图
-            await _save_debug_screenshot("before_click")
-            
+
+            # 点击前截图（记录弹窗就绪状态）
+            await self._save_debug_screenshot(page, "before_click")
+
             await payment_btn.click(force=True)
             await page.wait_for_timeout(3000)
-            
+
             try:
                 logger.debug("Checking for CAPTCHA...")
                 await agent.wait_for_challenge()
             except Exception as e:
                 logger.info(f"CAPTCHA detection skipped (Likely no CAPTCHA needed): {e}")
 
-            # 点击并处理完验证码后，截个图看结果
-            await _save_debug_screenshot("after_click_result")
+            # 处理完验证码后截图（记录中间状态）
+            await self._save_debug_screenshot(page, "after_captcha")
 
             try:
-                # 检查是否出现了“感谢购买”或“订单已完成”的特征
                 await page.wait_for_timeout(5000)
                 all_text = await page.locator("body").text_content()
                 if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library"]):
-                     logger.success("🎉 Instant Checkout: Confirmed via Page Text!")
-                     return
-                
+                    logger.success("Instant Checkout: Confirmed via Page Text!")
+                    await self._save_debug_screenshot(page, "success_text_confirmed")
+                    return True
+
                 if not await payment_btn.is_visible():
-                     logger.success("🎉 Instant Checkout: Payment button disappeared (Success inferred)")
-                     return
+                    logger.success("Instant Checkout: Payment button disappeared (Success inferred)")
+                    await self._save_debug_screenshot(page, "success_btn_disappeared")
+                    return True
             except Exception:
-                logger.success("🎉 Instant Checkout: Process finished (Iframe closed/redirected)")
-                return
+                logger.success("Instant Checkout: Process finished (Iframe closed/redirected)")
+                await self._save_debug_screenshot(page, "success_redirected")
+                return True
 
             with suppress(Exception):
                 await payment_btn.click(force=True)
                 await page.wait_for_timeout(2000)
-            
+
             logger.success("Instant checkout flow finished (Blind Success).")
+            await self._save_debug_screenshot(page, "success_blind")
+            return True
 
         except Exception as err:
             logger.warning(f"Instant checkout warning (Game might still be claimed): {err}")
-            await _save_debug_screenshot("checkout_error")
+            await self._save_debug_screenshot(page, "checkout_error")
             await page.reload()
+            return False
 
-    async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> bool:
+    async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> tuple[bool, set]:
+        """返回 (has_pending_cart_items, skipped_urls)。
+        skipped_urls 是确认已在库中或无效、本次被跳过的 URL 集合。
+        """
         has_pending_cart_items = False
+        skipped_urls: set = set()
 
         for url in urls:
             await page.goto(url, wait_until="load")
@@ -294,6 +327,8 @@ class EpicGames:
             title = await page.title()
             if "404" in title or "Page Not Found" in title:
                 logger.error(f"❌ Invalid URL (404 Page): {url}")
+                await self._save_debug_screenshot(page, "skip_404")
+                skipped_urls.add(url)
                 continue
 
             # 处理年龄限制弹窗
@@ -324,8 +359,11 @@ class EpicGames:
                     all_text = await page.locator("body").text_content()
                     if "In Library" in all_text or "Owned" in all_text:
                          logger.success(f"Already in the library (Page Text Scan) - {url=}")
+                         skipped_urls.add(url)
                          continue
                     logger.warning(f"Could not find any purchase button - {url=}")
+                    await self._save_debug_screenshot(page, "skip_no_button")
+                    skipped_urls.add(url)
                     continue
             except Exception:
                 pass
@@ -341,6 +379,7 @@ class EpicGames:
             # 如果是 'IN LIBRARY', 'OWNED', 'UNAVAILABLE', 'COMING SOON' -> 跳过
             if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED", "UNAVAILABLE", "COMING SOON"]):
                 logger.success(f"Game status is '{btn_text}' - Skipping.")
+                skipped_urls.add(url)  # 明确标记为已跳过，不发通知
                 continue
 
             # 5. 白名单检查 (Add to Cart 特殊处理)
@@ -358,10 +397,12 @@ class EpicGames:
             await purchase_btn.click()
             
             # 点击后，转入即时结账流程
-            await self._handle_instant_checkout(page)
+            success = await self._handle_instant_checkout(page)
+            if not success:
+                skipped_urls.add(url)  # 领取失败，剔除出待通知列表
             # ------------------------------------------------------------
 
-        return has_pending_cart_items
+        return has_pending_cart_items, skipped_urls
 
     async def _empty_cart(self, page: Page, wait_rerender: int = 30) -> bool | None:
         has_paid_free = False
@@ -406,9 +447,12 @@ class EpicGames:
             return await self._purchase_free_game()
 
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
-    async def collect_weekly_games(self, promotions: List[PromotionGame]):
+    async def collect_weekly_games(self, promotions: List[PromotionGame]) -> List[PromotionGame]:
+        """执行领取流程，返回本次实际领取成功的游戏列表。"""
+        # 每次任务开始前清理超过 7 天的旧截图
+        self._cleanup_old_screenshots(max_age_days=7)
         urls = [p.url for p in promotions]
-        has_cart_items = await self.add_promotion_to_cart(self.page, urls)
+        has_cart_items, skipped_urls = await self.add_promotion_to_cart(self.page, urls)
 
         if has_cart_items:
             await self._purchase_free_game()
@@ -417,5 +461,11 @@ class EpicGames:
                 logger.success("🎉 Successfully collected cart games")
             except TimeoutError:
                 logger.warning("Failed to collect cart games")
+                # 购物车结算失败时，所有在购物车里的游戏都没有领取成功
+                return []
         else:
             logger.success("🎉 Process completed (Instant claimed or already owned)")
+
+        # 只返回未被跳过（即真正尝试领取）的游戏
+        claimed = [p for p in promotions if p.url not in skipped_urls]
+        return claimed

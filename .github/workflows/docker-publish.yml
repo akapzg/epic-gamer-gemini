@@ -2,9 +2,11 @@ name: "Docker: Build & Push epic-gamer-gemini"
 
 on:
   workflow_dispatch:
-  # (可选) 你也可以保留 Tag 触发，方便发布正式版本
-  # push:
-  #   tags: [ 'v*.*.*' ]
+    inputs:
+      version:
+        description: '手动指定版本号 (例如: 1.0, 2.0)，留空则只构建 latest'
+        required: false
+        type: string
 
 env:
   # 替换为你的 DockerHub 用户名和仓库名
@@ -40,8 +42,9 @@ jobs:
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            type=raw,value=latest,enable=true
             type=semver,pattern={{version}}
+            type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event.inputs.version != '' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5

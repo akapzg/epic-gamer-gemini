@@ -14,6 +14,7 @@ import asyncio
 import json
 import signal
 import sys
+import time
 from contextlib import suppress
 from datetime import datetime
 
@@ -41,6 +42,22 @@ init_log(
 # Default timezone for scheduling operations
 TIMEZONE = timezone("Asia/Shanghai")
 
+def _cleanup_old_records(max_age_days: int = 30):
+    """清理过期的录像文件"""
+    try:
+        if not RECORD_DIR.exists():
+            return
+        now = time.time()
+        count = 0
+        for video_file in RECORD_DIR.glob("*.webm"):
+            if now - video_file.stat().st_mtime > max_age_days * 86400:
+                with suppress(Exception):
+                    video_file.unlink()
+                    count += 1
+        if count > 0:
+            logger.info(f"🗑️ Cleaned up {count} old video records (older than {max_age_days} days)")
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old records: {e}")
 
 @logger.catch
 async def execute_browser_tasks(headless: bool = True):
@@ -54,6 +71,9 @@ async def execute_browser_tasks(headless: bool = True):
         headless: Whether to run browser in headless mode
     """
     logger.debug("Starting Epic Games collection task")
+    
+    # 每次任务启动前清理过期 30 天的录像
+    _cleanup_old_records(max_age_days=30)
 
     # Configure browser with anti-detection features and video recording
     async with AsyncCamoufox(
@@ -81,6 +101,10 @@ async def execute_browser_tasks(headless: bool = True):
         agent = EpicAgent(game_page)
         await agent.collect_epic_games()
         logger.debug("Free games collection completed")
+
+        # 故意等待 3 秒，防止录像在成功的一瞬间戛然而止
+        logger.debug("Holding page for 3 seconds to finalize video recording...")
+        await game_page.wait_for_timeout(3000)
 
         # Cleanup browser resources
         logger.debug("Cleaning up browser resources")
