@@ -4,7 +4,6 @@ version = "0.4.1"
 dependencies = [
     "apscheduler>=3.11.0",
     "pydantic-settings>=2.8.1",
-    "celery[redis]>=5.4.0",
     "hcaptcha-challenger[camoufox]>=0.18.13",
     "openai", # === [新增] 用于通过 Gemini 中转调用 Gemini ===
 ]

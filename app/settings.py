@@ -59,11 +59,6 @@ class EpicSettings(AgentConfig):
     EXECUTION_TIMEOUT: float = Field(default=240.0) 
     RESPONSE_TIMEOUT: float = Field(default=60.0)
 
-    REDIS_URL: str = Field(default="redis://redis:6379/0")
-    CELERY_WORKER_CONCURRENCY: int = Field(default=1)
-    CELERY_TASK_TIME_LIMIT: int = Field(default=1200)
-    CELERY_TASK_SOFT_TIME_LIMIT: int = Field(default=900)
-
     @property
     def user_data_dir(self) -> Path:
         target_ = USER_DATA_DIR.joinpath(self.EPIC_EMAIL)
