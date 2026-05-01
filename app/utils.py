@@ -35,14 +35,18 @@ async def send_bark_notification(title: str, body: str):
     
     try:
         async with httpx.AsyncClient() as client:
+            # 构造更丰富的推送内容
             payload = {
                 "title": title,
-                "body": body,
-                "group": "epic-gamer"
+                "body": f"账号: {settings.EPIC_EMAIL}\n{body}",
+                "group": "epic-gamer",
+                "icon": "https://raw.githubusercontent.com/get-icon/geticon/master/icons/epic-games.svg",
+                "sound": "calypso"
             }
-            resp = await client.post(bark_url, data=payload)
+            # 按照官方文档推荐，使用 JSON 格式发送
+            resp = await client.post(bark_url, json=payload)
             if resp.status_code == 200:
-                logger.info(f"🚀 Bark 推送成功: {body}")
+                logger.info(f"🚀 Bark 推送成功 [{settings.EPIC_EMAIL}]: {body}")
             else:
                 logger.error(f"❌ Bark 推送失败: {resp.status_code} - {resp.text}")
     except Exception as e:
