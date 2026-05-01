@@ -308,9 +308,28 @@ class EpicGames:
             return True
 
         except Exception as err:
+            # 针对部分免结账直接成功的游戏 (显示 "It's all yours" 或 "Thanks for your order")
+            try:
+                all_text = ""
+                with suppress(Exception):
+                    all_text += await page.locator("body").text_content() or ""
+                with suppress(Exception):
+                    iframe = page.frame_locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
+                    all_text += await iframe.locator("body").text_content() or ""
+                
+                if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library", "It's all yours", "Thanks for your order"]):
+                    logger.success("Instant Checkout: Bypassed Place Order, directly confirmed via Page Text!")
+                    await self._save_debug_screenshot(page, "success_bypassed_button")
+                    return True
+            except Exception:
+                pass
+
             logger.warning(f"Instant checkout warning (Game might still be claimed): {err}")
             await self._save_debug_screenshot(page, "checkout_error")
-            await page.reload()
+            try:
+                await page.reload(timeout=15000)
+            except Exception as reload_err:
+                logger.warning(f"Failed to reload page: {reload_err}")
             return False
 
     async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> tuple[bool, set]:
