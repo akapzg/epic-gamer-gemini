@@ -19,8 +19,9 @@ services:
       # ----------------------------------------
       # Gemini 配置
       # ----------------------------------------
-      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://xxx.com}
-      - GEMINI_MODEL=gemini-2.5-pro
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      # 主模型配置 (优先从 .env 读取 GEMINI_MODEL)
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-pro}
 
       # ----------------------------------------
       # 运行参数
