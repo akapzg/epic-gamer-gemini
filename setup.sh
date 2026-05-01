@@ -35,6 +35,7 @@ if [ ! -f ".env" ]; then
 EPIC_EMAIL=your_email@example.com
 EPIC_PASSWORD=your_password
 GEMINI_API_KEY=your_gemini_api_key
+# GEMINI_MODEL=gemini-3-flash
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com
 BARK_URL=https://api.day.app/your_bark_key/
 EOF
