@@ -66,7 +66,7 @@ CHALLENGE_CLASSIFIER_MODEL=gemini-3-flash-preview
 只需在你的服务器上执行以下命令，脚本会自动为你生成配置文件并拉取最新镜像启动：
 ```bash
 wget https://raw.githubusercontent.com/akapzg/epic-gamer-gemini/main/setup.sh
-bash setup.sh
+sudo bash setup.sh
 ```
 
 ### 4. 多账号进阶部署
