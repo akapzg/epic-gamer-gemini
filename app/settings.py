@@ -1,4 +1,13 @@
 # -*- coding: utf-8 -*-
+"""
+Epic Games Free Game Collection - Configuration Settings
+
+Global settings and environment variable management for the application.
+
+@Time    : 2026/05/01
+@Author  : akapzg
+@GitHub  : https://github.com/akapzg/epic-gamer-gemini
+"""
 import os
 import asyncio
 from pathlib import Path

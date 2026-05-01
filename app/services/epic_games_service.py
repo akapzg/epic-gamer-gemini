@@ -1,8 +1,14 @@
 # -*- coding: utf-8 -*-
-# Time       : 2022/1/16 0:25
-# Author     : QIN2DIM
-# GitHub     : https://github.com/QIN2DIM
-# Description: 游戏商城控制句柄
+"""
+Epic Games Free Game Collection - Core Service
+
+Contains the main logic for interacting with the Epic Games Store, including
+checkout automation and status detection.
+
+@Time    : 2026/05/01
+@Author  : akapzg
+@GitHub  : https://github.com/akapzg/epic-gamer-gemini
+"""
 
 import asyncio
 from datetime import datetime, timedelta, timezone

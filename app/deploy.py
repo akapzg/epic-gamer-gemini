@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Epic Games Free Game Collection Deployment Module
+Epic Games Free Game Collection - Deployment Orchestrator
 
-This module orchestrates the automated collection of free games from Epic Games Store
-using browser automation and scheduling capabilities.
+This module manages the execution flow, scheduling, and cleanup for the automated
+Epic Games collection process.
 
-@Time    : 2025/7/16 21:28
-@Author  : QIN2DIM
-@GitHub  : https://github.com/QIN2DIM
+@Time    : 2026/05/01
+@Author  : akapzg
+@GitHub  : https://github.com/akapzg/epic-gamer-gemini
 """
 
 import asyncio

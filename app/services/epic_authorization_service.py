@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-@Time    : 2025/7/16 22:13
-@Author  : QIN2DIM
-@GitHub  : https://github.com/QIN2DIM
-@Desc    :
+Epic Games Free Game Collection - Authorization Service
+
+Handles the login process, 2FA bypass (if applicable), and session management
+for the Epic Games account.
+
+@Time    : 2026/05/01
+@Author  : akapzg
+@GitHub  : https://github.com/akapzg/epic-gamer-gemini
 """
 import asyncio
 import json
