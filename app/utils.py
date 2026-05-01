@@ -49,15 +49,44 @@ async def send_bark_notification(title: str, body: str):
         logger.error(f"❌ Bark 推送过程中出现异常: {e}")
 
 def init_log(**sink_channel):
-    # 简单的日志初始化，不再包含任何补丁逻辑
+    # 获取环境配置的日志级别，默认 DEBUG
     log_level = os.getenv("LOG_LEVEL", "DEBUG").upper()
-    logger.remove()
-    logger.add(sink=sys.stdout, level=log_level, filter=timezone_filter)
     
-    # 挂载其他日志输出
+    # 1. 配置控制台输出 (简洁、美观)
+    # 格式: 2026-05-01 12:00:00 | INFO     | 🚀 任务开始...
+    console_format = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+        "<level>{level: ^8}</level> | "
+        "<level>{message}</level>"
+    )
+    
+    logger.remove()
+    logger.add(sink=sys.stdout, level=log_level, format=console_format, filter=timezone_filter)
+    
+    # 2. 配置详细文件输出 (保留完整排错信息)
+    # 格式: 2026-05-01 12:00:00.000 | DEBUG | app.deploy:main:123 - 详细信息
+    file_format = (
+        "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+        "{level: <8} | "
+        "{name}:{function}:{line} - {message}"
+    )
+
     if sink_channel.get("error"):
-        logger.add(sink=sink_channel.get("error"), level="ERROR", rotation="5 MB", filter=timezone_filter)
+        logger.add(
+            sink=sink_channel.get("error"), 
+            level="ERROR", 
+            format=file_format,
+            rotation="5 MB", 
+            filter=timezone_filter
+        )
     if sink_channel.get("runtime"):
-        logger.add(sink=sink_channel.get("runtime"), level="TRACE", rotation="5 MB", filter=timezone_filter)
+        logger.add(
+            sink=sink_channel.get("runtime"), 
+            level="DEBUG", 
+            format=file_format,
+            rotation="10 MB", 
+            retention="7 days",
+            filter=timezone_filter
+        )
         
     return logger
