@@ -20,7 +20,13 @@ if ! $DOCKER_COMPOSE version &> /dev/null; then
     fi
 fi
 
-# 初始化目录与配置
+# 初始化部署目录
+DEPLOY_DIR="epic-gamer"
+echo "📂 正在准备部署目录: $DEPLOY_DIR"
+mkdir -p "$DEPLOY_DIR"
+cd "$DEPLOY_DIR"
+
+# 初始化数据卷目录
 mkdir -p volumes
 
 if [ ! -f ".env" ]; then
@@ -32,7 +38,11 @@ GEMINI_API_KEY=your_gemini_api_key
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com
 BARK_URL=https://api.day.app/your_bark_key/
 EOF
-    echo "⚠️ 请使用编辑器 (如 nano .env) 填入你的 EPIC 账号和 GEMINI 令牌！"
+    echo "--------------------------------------------------------"
+    echo "✅ 基础目录已就绪！"
+    echo "⚠️  下一步：请进入目录并编辑 .env 填入你的信息："
+    echo "   cd $DEPLOY_DIR && nano .env"
+    echo "--------------------------------------------------------"
     exit 0
 fi
 
@@ -60,6 +70,5 @@ $DOCKER_COMPOSE up -d
 
 echo "✅ 部署完成！"
 echo "你可以使用以下命令查看运行日志："
-echo "   $DOCKER_COMPOSE logs -f"
+echo "   cd $DEPLOY_DIR && $DOCKER_COMPOSE logs -f"
 echo "--------------------------------------------------------"
-
