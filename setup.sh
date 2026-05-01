@@ -29,8 +29,8 @@ if [ ! -f ".env" ]; then
 EPIC_EMAIL=your_email@example.com
 EPIC_PASSWORD=your_password
 GEMINI_API_KEY=your_gemini_api_key
-GEMINI_BASE_URL=https://api.syd.thepzg.site
-BARK_URL=
+GEMINI_BASE_URL=https://generativelanguage.googleapis.com
+BARK_URL=https://api.day.app/your_bark_key/
 EOF
     echo "⚠️ 请使用编辑器 (如 nano .env) 填入你的 EPIC 账号和 GEMINI 令牌！"
     exit 0

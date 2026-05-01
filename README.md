@@ -62,23 +62,53 @@ BARK_URL=https://api.day.app/your_bark_key
 CHALLENGE_CLASSIFIER_MODEL=gemini-3-flash-preview
 ```
 
-### 3. 一键构建与启动
+### 3. 一键部署 (最简单)
+只需在你的服务器上执行以下命令，脚本会自动为你生成配置文件并拉取最新镜像启动：
 ```bash
-docker/docker-compose.yaml
+wget https://raw.githubusercontent.com/akapzg/epic-gamer-gemini/main/setup.sh
+bash setup.sh
+```
+
+### 4. 多账号进阶部署
+如果你有多个 Epic 账号，**强烈建议使用 Docker Compose 多开容器**。在工作目录创建 `docker-compose.yml`：
+```yaml
+version: '3.8'
+services:
+  # 账号 1
+  epic-gamer-main:
+    image: akapzg/epic-gamer-gemini:latest
+    container_name: epic_gamer_main
+    env_file: .env.user1
+    volumes:
+      - ./volumes/user1:/app/app/volumes
+    restart: unless-stopped
+
+  # 账号 2
+  epic-gamer-alt:
+    image: akapzg/epic-gamer-gemini:latest
+    container_name: epic_gamer_alt
+    env_file: .env.user2
+    volumes:
+      - ./volumes/user2:/app/app/volumes
+    restart: unless-stopped
 ```
 
 ---
 
 ## 🛠️ 运维与调试
 
+### 调试与记录
+程序会在每次领取流程的关键节点自动保存排错资料：
+*   **截图 (`volumes/screenshots/`)**：遇到无法点击、弹窗阻挡或免结账直接成功等特殊情况时，自动拍下案发现场。
+*   **录像 (`volumes/record/`)**：保留完整的浏览器操作 `.webm` 录像（每次任务结束前会额外延迟 3 秒记录最终成功画面）。
 
-### 调试截图
-程序会自动将截图保存至 `./docker/volumes/screenshots/`。如果你发现游戏“领取成功”但库里没有，请通过截图排查原因。
-> 💡 **提示**：建议定期手动清理截图文件夹，以释放磁盘空间。
+> 💡 **智能存储管理**：程序自带自动清理机制。**每次定时任务启动前**，会自动删除超过 `7 天` 的旧截图，以及超过 `30 天` 的历史录像，彻底免除服务器磁盘爆满的后顾之忧！
 
-### 挂载路径说明
-*   日志：`./docker/volumes/logs/`
-*   用户数据：`./docker/volumes/user_data/`
+### 数据持久化说明
+请确保挂载了本地目录至容器的 `/app/app/volumes`，它包含：
+*   免密登录上下文缓存（防封号核心）
+*   运行日志与错误堆栈
+*   调试截图与操作录像
 
 ---
 
