@@ -1,6 +1,8 @@
 name: "Docker: Build & Push epic-gamer-gemini"
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
