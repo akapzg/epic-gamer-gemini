@@ -201,7 +201,7 @@ class EpicGames:
             logger.debug(f"📸 Screenshot saved: {path.name}")
 
     @staticmethod
-    def _cleanup_old_screenshots(max_age_days: int = 7) -> None:
+    def _cleanup_old_screenshots(max_age_days: int = 30) -> None:
         """删除超过 max_age_days 天的截图，防止磁盘持续积累。"""
         from settings import SCREENSHOTS_DIR
         if not SCREENSHOTS_DIR.exists():
@@ -476,8 +476,8 @@ class EpicGames:
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
     async def collect_weekly_games(self, promotions: List[PromotionGame]) -> List[PromotionGame]:
         """执行领取流程，返回本次实际领取成功的游戏列表。"""
-        # 每次任务开始前清理超过 7 天的旧截图
-        self._cleanup_old_screenshots(max_age_days=7)
+        # 每次任务开始前清理超过 30 天的旧截图
+        self._cleanup_old_screenshots(max_age_days=30)
         urls = [p.url for p in promotions]
         has_cart_items, skipped_urls = await self.add_promotion_to_cart(self.page, urls)
 
