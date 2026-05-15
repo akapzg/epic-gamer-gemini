@@ -248,8 +248,17 @@ class EpicGames:
             logger.debug("✅ Found button via CSS class match")
             return wpc, confirm_btn
         except AssertionError:
+            pass
+            
+        # 针对新版直接弹出的 "Add to library" 按钮
+        try:
+            add_to_library_btn = wpc.locator("button", has_text="Add to library")
+            await expect(add_to_library_btn).to_be_visible(timeout=5000)
+            logger.debug("✅ Found 'Add to library' button for free game checkout")
+            return wpc, add_to_library_btn
+        except AssertionError:
             logger.warning("Primary buttons not found in iframe.")
-            raise AssertionError("Could not find Place Order button in iframe")
+            raise AssertionError("Could not find Place Order or Add to Library button in iframe")
 
     @staticmethod
     async def _uk_confirm_order(wpc: FrameLocator):
@@ -318,10 +327,16 @@ class EpicGames:
                     iframe = page.frame_locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
                     all_text += await iframe.locator("body").text_content() or ""
                 
-                if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library", "It's all yours", "Thanks for your order"]):
-                    logger.success("Instant Checkout: Bypassed Place Order, directly confirmed via Page Text!")
-                    await self._save_debug_screenshot(page, "success_bypassed_button")
-                    return True
+                if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library", "It's all yours", "Thanks for your order", "Add it to your library to get started"]):
+                    # To avoid false positive with the new checkout modal text itself when it's NOT clicked,
+                    # we must ensure we actually bypassed the button. 
+                    # If "Add it to your library to get started" is there, it means the modal is open but NOT clicked.
+                    if "Add it to your library to get started" in all_text and "Thank you" not in all_text and "Success" not in all_text:
+                        pass # Don't falsely claim success if we just see the prompt!
+                    else:
+                        logger.success("Instant Checkout: Bypassed Place Order, directly confirmed via Page Text!")
+                        await self._save_debug_screenshot(page, "success_bypassed_button")
+                        return True
             except Exception:
                 pass
 
