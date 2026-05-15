@@ -354,7 +354,9 @@ class EpicGames:
             # 处理年龄限制弹窗
             try:
                 continue_btn = page.locator("//button//span[text()='Continue']")
-                if await continue_btn.is_visible(timeout=5000):
+                with suppress(Exception):
+                    await continue_btn.wait_for(state="visible", timeout=5000)
+                if await continue_btn.is_visible():
                     await continue_btn.click()
             except Exception:
                 pass 
@@ -366,7 +368,9 @@ class EpicGames:
 
             # 2. 如果没找到主按钮，尝试找“库中”状态
             try:
-                if not await purchase_btn.is_visible(timeout=5000):
+                with suppress(Exception):
+                    await purchase_btn.wait_for(state="visible", timeout=5000)
+                if not await purchase_btn.is_visible():
                     # 再次检查是否在库中 (有时按钮不叫 purchase-cta，而是简单的 disabled button)
                     all_text = await page.locator("body").text_content()
                     if "In Library" in all_text or "Owned" in all_text:
@@ -402,7 +406,9 @@ class EpicGames:
                 # 检测点击后是否弹出了 "Device not supported" 等拦截弹窗
                 try:
                     continue_btn = page.locator("div[role='dialog'] button").filter(has_text="Continue")
-                    if await continue_btn.is_visible(timeout=2000):
+                    with suppress(Exception):
+                        await continue_btn.wait_for(state="visible", timeout=2000)
+                    if await continue_btn.is_visible():
                         logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
                         await continue_btn.click()
                         await page.wait_for_timeout(1000)
