@@ -1,6 +1,6 @@
 services:
   epic-gamer-gemini:
-    image: akapzg/epic-gamer-gemini:latest
+    image: ghcr.io/akapzg/epic-gamer-gemini:latest
     restart: always
     network_mode: bridge
     container_name: epic-gamer-gemini

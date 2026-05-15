@@ -3,12 +3,7 @@
 Epic Games Free Game Collection - Core Service
 
 Contains the main logic for interacting with the Epic Games Store, including
-checkout automation and status detection.
-
-@Time    : 2026/05/01
-@Author  : akapzg
-@GitHub  : https://github.com/akapzg/epic-gamer-gemini
-"""
+checkout automation and status detection."""
 
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -364,15 +359,7 @@ class EpicGames:
             except Exception:
                 pass 
 
-            # 处理“设备不支持”弹窗 (Device not supported)
-            try:
-                device_unsupported_btn = page.locator("//button").filter(has_text="Continue")
-                if await device_unsupported_btn.is_visible(timeout=3000):
-                    logger.warning("⚠️ Detected 'Device not supported' warning, clicking Continue anyway.")
-                    await device_unsupported_btn.click()
-            except Exception:
-                pass
-            
+
             # 1. 尝试找到所有可能的“主按钮”
             # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
             purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
@@ -390,8 +377,10 @@ class EpicGames:
                     await self._save_debug_screenshot(page, "skip_no_button")
                     skipped_urls.add(url)
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error during purchase button detection: {e}")
+                skipped_urls.add(url)
+                continue
 
             # 3. 获取按钮文字
             btn_text = await purchase_btn.text_content()
@@ -407,11 +396,24 @@ class EpicGames:
                 skipped_urls.add(url)  # 明确标记为已跳过，不发通知
                 continue
 
+            # 定义一个内部辅助函数，点击并检测弹窗
+            async def _click_and_check_modal():
+                await purchase_btn.click()
+                # 检测点击后是否弹出了 "Device not supported" 等拦截弹窗
+                try:
+                    continue_btn = page.locator("div[role='dialog'] button").filter(has_text="Continue")
+                    if await continue_btn.is_visible(timeout=2000):
+                        logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
+                        await continue_btn.click()
+                        await page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
             # 5. 白名单检查 (Add to Cart 特殊处理)
             # 如果包含 'CART'，说明是加入购物车流程
             if "CART" in btn_text_upper:
                 logger.debug(f"🛒 Logic: Add To Cart - {url=}")
-                await purchase_btn.click()
+                await _click_and_check_modal()
                 has_pending_cart_items = True
                 continue
             
@@ -419,7 +421,7 @@ class EpicGames:
             # 只要不是黑名单，也不是购物车，统统当做 "Get/Purchase" 直接点击！
             # 不管它写的是 'Get', 'Free', 'Purchase', 'Buy Now'，只要 API 说是免费的，我们就点！
             logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
-            await purchase_btn.click()
+            await _click_and_check_modal()
             
             # 点击后，转入即时结账流程
             success = await self._handle_instant_checkout(page)

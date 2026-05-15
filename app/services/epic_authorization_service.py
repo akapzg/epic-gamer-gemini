@@ -3,12 +3,7 @@
 Epic Games Free Game Collection - Authorization Service
 
 Handles the login process, 2FA bypass (if applicable), and session management
-for the Epic Games account.
-
-@Time    : 2026/05/01
-@Author  : akapzg
-@GitHub  : https://github.com/akapzg/epic-gamer-gemini
-"""
+for the Epic Games account."""
 import asyncio
 import json
 import time

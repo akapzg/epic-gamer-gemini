@@ -2,12 +2,7 @@
 """
 Epic Games Free Game Collection - Data Models
 
-Defines the Pydantic data structures for Epic Games promotions, orders, and items.
-
-@Time    : 2026/05/01
-@Author  : akapzg
-@GitHub  : https://github.com/akapzg/epic-gamer-gemini
-"""
+Defines the Pydantic data structures for Epic Games promotions, orders, and items."""
 
 from typing import List
 

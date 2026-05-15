@@ -2,12 +2,7 @@
 """
 Epic Games Free Game Collection - Utilities
 
-Common utility functions for logging, notifications, and time handling.
-
-@Time    : 2026/05/01
-@Author  : akapzg
-@GitHub  : https://github.com/akapzg/epic-gamer-gemini
-"""
+Common utility functions for logging, notifications, and time handling."""
 from __future__ import annotations
 import os
 import sys

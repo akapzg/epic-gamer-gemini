@@ -54,7 +54,7 @@ version: '3.8'
 
 services:
   epic-gamer:
-    image: akapzg/epic-gamer-gemini:latest
+    image: ghcr.io/akapzg/epic-gamer-gemini:latest
     container_name: epic_gamer
     env_file:
       - .env

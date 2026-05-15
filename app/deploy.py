@@ -3,12 +3,7 @@
 Epic Games Free Game Collection - Deployment Orchestrator
 
 This module manages the execution flow, scheduling, and cleanup for the automated
-Epic Games collection process.
-
-@Time    : 2026/05/01
-@Author  : akapzg
-@GitHub  : https://github.com/akapzg/epic-gamer-gemini
-"""
+Epic Games collection process."""
 
 import asyncio
 import json
@@ -149,10 +144,22 @@ async def deploy():
     scheduler.add_job(
         execute_browser_tasks,
         trigger=CronTrigger(
-            day_of_week="thu", hour="23,0,1,2,3", minute="30", timezone="Asia/Shanghai"
+            day_of_week="thu", hour="23", minute="30", timezone="Asia/Shanghai"
         ),
-        id="weekly_epic_games_task",
-        name="weekly_epic_games_task",
+        id="weekly_epic_games_task_thu",
+        name="weekly_epic_games_task_thu",
+        args=[headless],
+        replace_existing=False,
+        max_instances=1,
+    )
+
+    scheduler.add_job(
+        execute_browser_tasks,
+        trigger=CronTrigger(
+            day_of_week="fri", hour="0,1,2,3", minute="30", timezone="Asia/Shanghai"
+        ),
+        id="weekly_epic_games_task_fri",
+        name="weekly_epic_games_task_fri",
         args=[headless],
         replace_existing=False,
         max_instances=1,

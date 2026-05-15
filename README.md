@@ -76,7 +76,7 @@ version: '3.8'
 services:
   # 账号 1
   epic-gamer-main:
-    image: akapzg/epic-gamer-gemini:latest
+    image: ghcr.io/akapzg/epic-gamer-gemini:latest
     container_name: epic_gamer_main
     env_file: .env.user1
     volumes:
@@ -85,7 +85,7 @@ services:
 
   # 账号 2
   epic-gamer-alt:
-    image: akapzg/epic-gamer-gemini:latest
+    image: ghcr.io/akapzg/epic-gamer-gemini:latest
     container_name: epic_gamer_alt
     env_file: .env.user2
     volumes:
