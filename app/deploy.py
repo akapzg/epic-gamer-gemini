@@ -7,6 +7,7 @@ Epic Games collection process."""
 
 import asyncio
 import json
+import random
 import signal
 import sys
 import time
@@ -55,7 +56,7 @@ def _cleanup_old_records(max_age_days: int = 30):
         logger.warning(f"Failed to cleanup old records: {e}")
 
 @logger.catch
-async def execute_browser_tasks(headless: bool = True):
+async def execute_browser_tasks(headless: bool = True, random_delay: bool = False):
     """
     Execute Epic Games free game collection tasks using browser automation.
 
@@ -64,7 +65,13 @@ async def execute_browser_tasks(headless: bool = True):
 
     Args:
         headless: Whether to run browser in headless mode
+        random_delay: Whether to add a random staggered delay before execution (for anti-bot defense)
     """
+    if random_delay:
+        delay_seconds = random.randint(10, 600)
+        logger.info(f"⏳ 防风控错峰延迟：系统随机等待 {delay_seconds} 秒后启动任务...")
+        await asyncio.sleep(delay_seconds)
+
     logger.debug("Starting Epic Games collection task")
     
     # 每次任务启动前清理过期 30 天的录像
@@ -129,8 +136,8 @@ async def deploy():
         f"Starting deployment with configuration: {json.dumps(sj, indent=2, ensure_ascii=False)}"
     )
 
-    # Execute an immediate collection task
-    await execute_browser_tasks(headless=headless)
+    # Execute an immediate collection task (no random delay for manual trigger)
+    await execute_browser_tasks(headless=headless, random_delay=False)
 
     # Skip scheduler setup if disabled in configuration
     if not settings.ENABLE_APSCHEDULER:
@@ -148,22 +155,22 @@ async def deploy():
         ),
         id="weekly_epic_games_task_thu",
         name="weekly_epic_games_task_thu",
-        args=[headless],
+        args=[headless, True],
         replace_existing=False,
         max_instances=1,
     )
 
-    scheduler.add_job(
-        execute_browser_tasks,
-        trigger=CronTrigger(
-            day_of_week="fri", hour="0,1,2,3", minute="30", timezone="Asia/Shanghai"
-        ),
-        id="weekly_epic_games_task_fri",
-        name="weekly_epic_games_task_fri",
-        args=[headless],
-        replace_existing=False,
-        max_instances=1,
-    )
+    # scheduler.add_job(
+    #     execute_browser_tasks,
+    #     trigger=CronTrigger(
+    #         day_of_week="fri", hour="0,1,2,3", minute="30", timezone="Asia/Shanghai"
+    #     ),
+    #     id="weekly_epic_games_task_fri",
+    #     name="weekly_epic_games_task_fri",
+    #     args=[headless, True],
+    #     replace_existing=False,
+    #     max_instances=1,
+    # )
 
     # Strategy 2: Daily at 12:00 PM (Beijing Time)
     scheduler.add_job(
@@ -171,7 +178,7 @@ async def deploy():
         trigger=CronTrigger(hour="12", minute="0", timezone="Asia/Shanghai"),
         id="daily_epic_games_task",
         name="daily_epic_games_task",
-        args=[headless],
+        args=[headless, True],
         replace_existing=False,
         max_instances=1,
     )

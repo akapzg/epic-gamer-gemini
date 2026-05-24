@@ -48,11 +48,10 @@ def get_promotions() -> List[PromotionGame]:
 
     promotions: List[PromotionGame] = []
 
-    resp = httpx.get(URL_PROMOTIONS, params={"local": "zh-CN"})
-
     try:
+        resp = httpx.get(URL_PROMOTIONS, params={"locale": "en-US"}, timeout=10.0)
         data = resp.json()
-    except JSONDecodeError as err:
+    except Exception as err:
         logger.error("Failed to get promotions", err=err)
         return []
 
@@ -232,33 +231,27 @@ class EpicGames:
         iframe_selector = "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
         wpc = page.frame_locator(iframe_selector).first
 
-        logger.debug("Looking for 'PLACE ORDER' button...")
+        logger.debug("Looking for purchase/checkout button...")
         place_order_btn = wpc.locator("button", has_text="PLACE ORDER")
         confirm_btn = wpc.locator("//button[contains(@class, 'payment-confirm__btn')]")
+        add_to_library_btn = wpc.locator("button", has_text="Add to library")
         
+        combined_btn = place_order_btn.or_(confirm_btn).or_(add_to_library_btn)
         try:
-            await expect(place_order_btn).to_be_visible(timeout=15000)
-            logger.debug("✅ Found 'PLACE ORDER' button via text match")
-            return wpc, place_order_btn
-        except AssertionError:
-            pass
-            
-        try:
-            await expect(confirm_btn).to_be_visible(timeout=5000)
-            logger.debug("✅ Found button via CSS class match")
-            return wpc, confirm_btn
-        except AssertionError:
-            pass
-            
-        # 针对新版直接弹出的 "Add to library" 按钮
-        try:
-            add_to_library_btn = wpc.locator("button", has_text="Add to library")
-            await expect(add_to_library_btn).to_be_visible(timeout=5000)
-            logger.debug("✅ Found 'Add to library' button for free game checkout")
-            return wpc, add_to_library_btn
+            await expect(combined_btn).to_be_visible(timeout=15000)
         except AssertionError:
             logger.warning("Primary buttons not found in iframe.")
             raise AssertionError("Could not find Place Order or Add to Library button in iframe")
+
+        if await place_order_btn.is_visible():
+            logger.debug("✅ Found 'PLACE ORDER' button via text match")
+            return wpc, place_order_btn
+        elif await confirm_btn.is_visible():
+            logger.debug("✅ Found button via CSS class match")
+            return wpc, confirm_btn
+        else:
+            logger.debug("✅ Found 'Add to library' button for free game checkout")
+            return wpc, add_to_library_btn
 
     @staticmethod
     async def _uk_confirm_order(wpc: FrameLocator):
@@ -313,9 +306,9 @@ class EpicGames:
                 await payment_btn.click(force=True)
                 await page.wait_for_timeout(2000)
 
-            logger.success("Instant checkout flow finished (Blind Success).")
-            await self._save_debug_screenshot(page, "success_blind")
-            return True
+            logger.warning("Instant checkout: Could not confirm success. Marking as uncertain.")
+            await self._save_debug_screenshot(page, "uncertain_unconfirmed")
+            return False
 
         except Exception as err:
             # 针对部分免结账直接成功的游戏 (显示 "It's all yours" 或 "Thanks for your order")
@@ -409,8 +402,8 @@ class EpicGames:
             logger.debug(f"👉 Found Button: '{btn_text}'")
 
             # 4. 黑名单检查：只有这些情况绝对不能点
-            # 如果是 'IN LIBRARY', 'OWNED', 'UNAVAILABLE', 'COMING SOON' -> 跳过
-            if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED", "UNAVAILABLE", "COMING SOON"]):
+            # 如果是 'IN LIBRARY', 'OWNED', 'UNAVAILABLE', 'COMING SOON', 'REQUIRES BASE GAME', 'BASE GAME' -> 跳过
+            if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED", "UNAVAILABLE", "COMING SOON", "REQUIRES BASE GAME", "BASE GAME"]):
                 logger.success(f"Game status is '{btn_text}' - Skipping.")
                 skipped_urls.add(url)  # 明确标记为已跳过，不发通知
                 continue
@@ -447,6 +440,11 @@ class EpicGames:
             # 点击后，转入即时结账流程
             success = await self._handle_instant_checkout(page)
             if not success:
+                logger.info(f"Retrying instant checkout for {url}...")
+                await page.reload(wait_until="load")
+                await _click_and_check_modal()
+                success = await self._handle_instant_checkout(page)
+            if not success:
                 skipped_urls.add(url)  # 领取失败，剔除出待通知列表
             # ------------------------------------------------------------
 
@@ -474,7 +472,7 @@ class EpicGames:
             logger.warning("Failed to empty shopping cart", err=err)
             return False
 
-    async def _purchase_free_game(self):
+    async def _purchase_free_game(self, retry_count: int = 0, max_retries: int = 3):
         await self.page.goto(URL_CART, wait_until="domcontentloaded")
         logger.debug("Move ALL paid games from the shopping cart out")
         await self._empty_cart(self.page)
@@ -490,9 +488,12 @@ class EpicGames:
             await self._uk_confirm_order(wpc)
             await agent.wait_for_challenge()
         except Exception as err:
-            logger.warning(f"Failed to solve captcha - {err}")
+            if retry_count >= max_retries:
+                logger.error(f"Cart checkout failed after {max_retries} retries: {err}")
+                return
+            logger.warning(f"Failed to solve captcha (attempt {retry_count + 1}/{max_retries}) - {err}")
             await self.page.reload()
-            return await self._purchase_free_game()
+            return await self._purchase_free_game(retry_count + 1, max_retries)
 
     @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
     async def collect_weekly_games(self, promotions: List[PromotionGame]) -> List[PromotionGame]:
