@@ -441,9 +441,14 @@ class EpicGames:
             success = await self._handle_instant_checkout(page)
             if not success:
                 logger.info(f"Retrying instant checkout for {url}...")
-                await page.reload(wait_until="load")
-                await _click_and_check_modal()
-                success = await self._handle_instant_checkout(page)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await _click_and_check_modal()
+                    success = await self._handle_instant_checkout(page)
+                except Exception as e:
+                    logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
+                    success = False
+
             if not success:
                 skipped_urls.add(url)  # 领取失败，剔除出待通知列表
             # ------------------------------------------------------------
