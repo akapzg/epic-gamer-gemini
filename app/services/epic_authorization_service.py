@@ -53,31 +53,36 @@ class EpicAuthorization:
 
         btn_ids = ["#link-success", "#login-reminder-prompt-setup-tfa-skip", "#yes"]
 
-        # == 账号长期不登录需要做的额外验证 == #
-
-        while self._is_refresh_csrf_signal.empty() and btn_ids:
+        # 账号长期不登录可能需要跳过提示
+        for _ in range(10):
+            if not self._is_refresh_csrf_signal.empty() or not btn_ids:
+                break
             await self.page.wait_for_timeout(500)
-            action_chains = btn_ids.copy()
-            for action in action_chains:
+            for action in list(btn_ids):
                 with suppress(Exception):
                     reminder_btn = self.page.locator(action)
-                    await expect(reminder_btn).to_be_visible(timeout=1000)
-                    await reminder_btn.click(timeout=1000)
-                    btn_ids.remove(action)
+                    if await reminder_btn.is_visible(timeout=1000):
+                        await reminder_btn.click()
+                        btn_ids.remove(action)
 
     async def _login(self) -> bool | None:
-        # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
-
-        # {{< SIGN IN PAGE >}}
         logger.debug("Login with Email")
 
         try:
-            point_url = "https://www.epicgames.com/account/personal?lang=en-US&productName=egs&sessionInvalidated=true"
-            await self.page.goto(point_url, wait_until="domcontentloaded")
+            # 如果当前页面已经在登录页且有 #email，无需重新加载
+            email_input = self.page.locator("#email").first
+            is_email_visible = False
+            with suppress(Exception):
+                is_email_visible = await email_input.is_visible()
+
+            if not is_email_visible:
+                point_url = "https://www.epicgames.com/account/personal?lang=en-US&productName=egs&sessionInvalidated=true"
+                await self.page.goto(point_url, wait_until="domcontentloaded")
+                email_input = self.page.locator("#email").first
+                await email_input.wait_for(state="visible", timeout=20000)
 
             # 1. 使用电子邮件地址登录
-            email_input = self.page.locator("#email")
             await email_input.clear()
             await email_input.type(settings.EPIC_EMAIL)
 
@@ -85,7 +90,6 @@ class EpicAuthorization:
             await self.page.click("#continue")
 
             # 3. 关键：点击继续后，Epic 可能会立即弹出人机验证（验证码出现在输入密码之前）！
-            # 必须在此处检测并完成人机挑战，否则页面不会显示密码输入框
             try:
                 logger.debug("Checking for CAPTCHA after email submit...")
                 await agent.wait_for_challenge()
@@ -99,7 +103,6 @@ class EpicAuthorization:
             await password_input.type(settings.EPIC_PASSWORD.get_secret_value())
 
             # 5. 点击登录按钮，触发人机挑战值守监听器
-            # Active hCaptcha checkbox
             sign_in_btn = self.page.locator("#sign-in, button[type='submit']").first
             await sign_in_btn.wait_for(state="visible", timeout=15000)
             await sign_in_btn.click()
@@ -110,12 +113,20 @@ class EpicAuthorization:
             except Exception as e:
                 logger.debug(f"No CAPTCHA after sign-in (or skipped): {e}")
 
-            # Wait for the page to redirect
-            await asyncio.wait_for(self._is_login_success_signal.get(), timeout=60)
+            # 等待登录成功信号或页面离开登录页
+            try:
+                await asyncio.wait_for(self._is_login_success_signal.get(), timeout=30)
+            except asyncio.TimeoutError:
+                if "/id/login" not in self.page.url:
+                    logger.debug("Redirected away from login page, inferring login success.")
+                else:
+                    raise TimeoutError("Login timed out and still on /id/login")
+
             logger.success("Login success")
 
-            await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
-            logger.success("Right account validation success")
+            with suppress(Exception):
+                await asyncio.wait_for(self._handle_right_account_validation(), timeout=30)
+                logger.success("Right account validation success")
             return True
         except Exception as err:
             logger.warning(f"{err}")
@@ -127,31 +138,26 @@ class EpicAuthorization:
     async def invoke(self):
         self.page.on("response", self._on_response_anything)
 
-        for _ in range(3):
-            await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
-            await self.page.wait_for_timeout(2000)
+        logger.debug("正在验证 Epic Games 账号会话真实有效性...")
+        for attempt in range(3):
+            # 访问受鉴权保护的个人中心检验会话真实有效性；若会话过期，Epic 会立即 302 重定向到 /id/login
+            try:
+                await self.page.goto("https://www.epicgames.com/account/personal", wait_until="domcontentloaded")
+                await self.page.wait_for_timeout(2000)
+            except Exception as e:
+                logger.warning(f"导航至个人中心重试 ({attempt + 1}/3): {e}")
 
-            # 严格多维度检测：页面若出现明确的 Sign in，直接判定为未登录
-            sign_in_btn = self.page.locator(
-                "//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "//header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "//header//span[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "a[role='button']:has-text('Sign In')"
-            ).first
-            is_sign_in = False
-            with suppress(Exception):
-                is_sign_in = await sign_in_btn.is_visible()
+            # 若被重定向到 /id/login，说明会话已过期，执行登录
+            if "/id/login" in self.page.url:
+                logger.info("检测到账号会话已失效 (被重定向至登录页)，启动登录流程...")
+                if await self._login():
+                    logger.success("登录成功，会话已恢复有效")
+                    return True
+                else:
+                    logger.warning(f"登录尝试 {attempt + 1} 失败，准备重试...")
+                    continue
+            else:
+                logger.success("Epic Games 账号会话真实有效，无需重新登录")
+                return True
 
-            if not is_sign_in:
-                nav = self.page.locator("//egs-navigation").first
-                with suppress(Exception):
-                    status = await nav.get_attribute("isloggedin")
-                    display_name = await nav.get_attribute("displayname")
-                    # 只有 isloggedin 为 true，且 displayname 存在且不为 'null' 时，才是真正且可信的已登录态
-                    if status == "true" and display_name and display_name.lower() != "null":
-                        logger.success(f"Epic Games is already logged in as '{display_name}'")
-                        return True
-
-            logger.info("未检测到有效登录状态，启动登录流程...")
-            if await self._login():
-                return
+        return False
