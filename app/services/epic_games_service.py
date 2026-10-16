@@ -396,39 +396,6 @@ class EpicGames:
             except Exception:
                 pass
 
-            # 严格登录态检测与就地修复：检查是否处于未登录状态
-            sign_in_btn = page.locator(
-                "//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "//header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "//header//span[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
-                "a[role='button']:has-text('Sign In')"
-            ).first
-
-            needs_login = False
-            with suppress(Exception):
-                if await sign_in_btn.is_visible():
-                    needs_login = True
-
-            if not needs_login:
-                nav = page.locator("//egs-navigation").first
-                with suppress(Exception):
-                    status = await nav.get_attribute("isloggedin")
-                    display_name = await nav.get_attribute("displayname")
-                    if status != "true" or not display_name or display_name.lower() == "null":
-                        needs_login = True
-
-            if needs_login:
-                logger.warning(f"⚠️ 进入游戏页面检测到未登录状态，尝试就地重新登录... ({url})")
-                auth = EpicAuthorization(page)
-                if await auth._login():
-                    logger.success("就地登录成功，重新加载游戏页面...")
-                    await page.goto(url, wait_until="load")
-                    await page.wait_for_timeout(2000)
-                else:
-                    logger.error(f"❌ 就地登录失败，无法领取 {url}")
-                    skipped_urls.add(url)
-                    continue
-
             # 1. 尝试找到主按钮或库中状态
             # 综合定位器：优先 data-testid，再放宽至包含 Get / In Library 等关键词的按钮
             purchase_btn = (
@@ -532,20 +499,9 @@ class EpicGames:
 
             # 检测点击后是否被跳转到了登录页
             if "/id/login" in page.url:
-                logger.warning(f"⚠️ 点击购买后被重定向到登录页面，尝试就地重新登录... ({url})")
-                auth = EpicAuthorization(page)
-                if await auth._login():
-                    logger.success("就地登录成功，重新加载游戏页面并再次尝试领取...")
-                    await page.goto(url, wait_until="load")
-                    await page.wait_for_timeout(2000)
-                    try:
-                        retry_btn = page.locator("button, a[role='button']").filter(
-                            has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
-                        ).first
-                        if await retry_btn.is_visible(timeout=5000):
-                            await _click_and_check_modal(retry_btn)
-                    except Exception:
-                        pass
+                logger.warning(f"⚠️ 点击购买后被重定向到登录页面，登录态已失效，无法领取 {url}")
+                skipped_urls.add(url)
+                continue
 
             # 转入即时结账流程
             success = await self._handle_instant_checkout(page)

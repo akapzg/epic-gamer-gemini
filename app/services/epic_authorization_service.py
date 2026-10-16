@@ -84,17 +84,31 @@ class EpicAuthorization:
             # 2. 点击继续按钮
             await self.page.click("#continue")
 
-            # 3. 输入密码
+            # 3. 关键：点击继续后，Epic 可能会立即弹出人机验证（验证码出现在输入密码之前）！
+            # 必须在此处检测并完成人机挑战，否则页面不会显示密码输入框
+            try:
+                logger.debug("Checking for CAPTCHA after email submit...")
+                await agent.wait_for_challenge()
+            except Exception as e:
+                logger.debug(f"No CAPTCHA after email submit (or skipped): {e}")
+
+            # 4. 输入密码 (等待密码输入框就绪)
             password_input = self.page.locator("#password")
+            await password_input.wait_for(state="visible", timeout=20000)
             await password_input.clear()
             await password_input.type(settings.EPIC_PASSWORD.get_secret_value())
 
-            # 4. 点击登录按钮，触发人机挑战值守监听器
+            # 5. 点击登录按钮，触发人机挑战值守监听器
             # Active hCaptcha checkbox
-            await self.page.click("#sign-in")
+            sign_in_btn = self.page.locator("#sign-in, button[type='submit']").first
+            await sign_in_btn.wait_for(state="visible", timeout=15000)
+            await sign_in_btn.click()
 
-            # Active hCaptcha challenge
-            await agent.wait_for_challenge()
+            # 6. 点击登录后，可能再次触发人机挑战
+            try:
+                await agent.wait_for_challenge()
+            except Exception as e:
+                logger.debug(f"No CAPTCHA after sign-in (or skipped): {e}")
 
             # Wait for the page to redirect
             await asyncio.wait_for(self._is_login_success_signal.get(), timeout=60)

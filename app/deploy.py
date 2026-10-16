@@ -82,8 +82,9 @@ async def execute_browser_tasks(headless: bool = True, random_delay: bool = Fals
         persistent_context=True,
         user_data_dir=settings.user_data_dir,
         screen=Screen(max_width=1920, max_height=1080, min_height=1080, min_width=1920),
+        viewport=ViewportSize(width=1920, height=1080),
         record_video_dir=RECORD_DIR,
-        record_video_size=ViewportSize(width=1280, height=720),
+        record_video_size=ViewportSize(width=1920, height=1080),
         humanize=0.2,
         headless=headless,
     ) as browser:
