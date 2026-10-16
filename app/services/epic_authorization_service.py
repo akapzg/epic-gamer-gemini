@@ -115,10 +115,20 @@ class EpicAuthorization:
 
         for _ in range(3):
             await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+            await self.page.wait_for_timeout(2000)
 
-            if "true" == await self.page.locator("//egs-navigation").get_attribute("isloggedin"):
-                logger.success("Epic Games is already logged in")
-                return True
+            # 双重验证：页面右上角若出现明确的 Sign in，直接判定为未登录
+            sign_in_btn = self.page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | //span[text()='Sign in' or text()='Sign In']").first
+            is_sign_in = False
+            with suppress(Exception):
+                is_sign_in = await sign_in_btn.is_visible()
 
+            if not is_sign_in:
+                status = await self.page.locator("//egs-navigation").get_attribute("isloggedin")
+                if "true" == status:
+                    logger.success("Epic Games is already logged in")
+                    return True
+
+            logger.info("未检测到有效登录状态，启动登录流程...")
             if await self._login():
                 return

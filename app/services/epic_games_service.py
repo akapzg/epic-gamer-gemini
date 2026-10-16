@@ -112,33 +112,25 @@ class EpicAgent:
         self._cookies = None
 
     async def _sync_order_history(self):
-        if self._orders:
-            return
-        completed_orders: List[OrderItem] = []
-        try:
-            await self.page.goto("https://www.epicgames.com/account/v2/payment/ajaxGetOrderHistory")
-            text_content = await self.page.text_content("//pre")
-            data = json.loads(text_content)
-            for _order in data["orders"]:
-                order = Order(**_order)
-                if order.orderType != "PURCHASE":
-                    continue
-                for item in order.items:
-                    if not item.namespace or len(item.namespace) != 32:
-                        continue
-                    completed_orders.append(item)
-        except Exception as err:
-            logger.warning(err)
-        self._orders = completed_orders
+        # 彻底废除此接口：ajaxGetOrderHistory 现已强制重定向到 /id/login，会冲刷有效 Session 并超时 30 秒
+        self._orders = []
 
     async def _check_orders(self):
-        await self._sync_order_history()
-        self._namespaces = self._namespaces or [order.namespace for order in self._orders]
-        self._promotions = [p for p in get_promotions() if p.namespace not in self._namespaces]
+        # 移除已废弃且会导致登录态被清空的 ajaxGetOrderHistory 请求
+        self._promotions = get_promotions()
 
     async def _should_ignore_task(self) -> bool:
         self._ctx_cookies_is_available = False
         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
+        await self.page.wait_for_timeout(2000)
+
+        # 检查是否为未登录态 (存在 Sign in 按钮)
+        sign_in_btn = self.page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In')] | //header//span[text()='Sign in' or text()='Sign In']").first
+        with suppress(Exception):
+            if await sign_in_btn.is_visible():
+                logger.error("❌ 无法领取：检测到当前页面存在 'Sign in' 按钮，登录会话已失效")
+                return False
+
         status = await self.page.locator("//egs-navigation").get_attribute("isloggedin")
         if status == "false":
             logger.error("❌ context cookies is not available")
@@ -370,6 +362,14 @@ class EpicGames:
                 pass 
 
 
+            # 检测是否处于未登录状态
+            sign_in_btn = page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In')] | //header//span[text()='Sign in' or text()='Sign In']").first
+            with suppress(Exception):
+                if await sign_in_btn.is_visible():
+                    logger.error(f"❌ 警告：进入游戏页面检测到未登录状态 (存在 Sign in 按钮)，无法领取 {url}")
+                    skipped_urls.add(url)
+                    continue
+
             # 1. 尝试找到所有可能的“主按钮”
             # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
             purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
@@ -377,18 +377,25 @@ class EpicGames:
             # 2. 如果没找到主按钮，尝试找“库中”状态
             try:
                 with suppress(Exception):
-                    await purchase_btn.wait_for(state="visible", timeout=5000)
+                    await purchase_btn.wait_for(state="visible", timeout=15000)
                 if not await purchase_btn.is_visible():
-                    # 再次检查是否在库中 (有时按钮不叫 purchase-cta，而是简单的 disabled button)
-                    all_text = await page.locator("body").text_content()
-                    if "In Library" in all_text or "Owned" in all_text:
-                         logger.success(f"Already in the library (Page Text Scan) - {url=}")
-                         skipped_urls.add(url)
-                         continue
-                    logger.warning(f"Could not find any purchase button - {url=}")
-                    await self._save_debug_screenshot(page, "skip_no_button")
-                    skipped_urls.add(url)
-                    continue
+                    # 备选选择器：有时按钮没有 data-testid，直接查找侧边栏内的 Get / 获取 按钮
+                    alt_btn = page.locator("//aside//button[contains(., 'Get') or contains(., 'GET') or contains(., '获取')]").first
+                    if await alt_btn.is_visible():
+                        purchase_btn = alt_btn
+                    else:
+                        # 仅在侧边栏购买区域精确检查是否在库中，绝不扫描全页 body（防止匹配底部版权文字 Owned）
+                        aside = page.locator("aside, div[data-component='PurchaseCard']").first
+                        if await aside.count() > 0:
+                            aside_text = (await aside.text_content() or "").upper()
+                            if "IN LIBRARY" in aside_text or "OWNED" in aside_text:
+                                logger.success(f"Already in the library (Purchase Area Scan) - {url=}")
+                                skipped_urls.add(url)
+                                continue
+                        logger.warning(f"Could not find any purchase button - {url=}")
+                        await self._save_debug_screenshot(page, "skip_no_button")
+                        skipped_urls.add(url)
+                        continue
             except Exception as e:
                 logger.warning(f"Error during purchase button detection: {e}")
                 skipped_urls.add(url)
