@@ -24,7 +24,10 @@ from models import OrderItem, Order
 from models import PromotionGame
 from settings import settings, RUNTIME_DIR
 from utils import send_bark_notification
-from app.services.epic_authorization_service import EpicAuthorization
+try:
+    from services.epic_authorization_service import EpicAuthorization
+except ImportError:
+    from app.services.epic_authorization_service import EpicAuthorization
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 URL_LOGIN = (
