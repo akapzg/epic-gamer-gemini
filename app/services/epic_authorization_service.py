@@ -117,17 +117,26 @@ class EpicAuthorization:
             await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
             await self.page.wait_for_timeout(2000)
 
-            # 双重验证：页面右上角若出现明确的 Sign in，直接判定为未登录
-            sign_in_btn = self.page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | //span[text()='Sign in' or text()='Sign In']").first
+            # 严格多维度检测：页面若出现明确的 Sign in，直接判定为未登录
+            sign_in_btn = self.page.locator(
+                "//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "//header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "//header//span[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "a[role='button']:has-text('Sign In')"
+            ).first
             is_sign_in = False
             with suppress(Exception):
                 is_sign_in = await sign_in_btn.is_visible()
 
             if not is_sign_in:
-                status = await self.page.locator("//egs-navigation").get_attribute("isloggedin")
-                if "true" == status:
-                    logger.success("Epic Games is already logged in")
-                    return True
+                nav = self.page.locator("//egs-navigation").first
+                with suppress(Exception):
+                    status = await nav.get_attribute("isloggedin")
+                    display_name = await nav.get_attribute("displayname")
+                    # 只有 isloggedin 为 true，且 displayname 存在且不为 'null' 时，才是真正且可信的已登录态
+                    if status == "true" and display_name and display_name.lower() != "null":
+                        logger.success(f"Epic Games is already logged in as '{display_name}'")
+                        return True
 
             logger.info("未检测到有效登录状态，启动登录流程...")
             if await self._login():

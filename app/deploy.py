@@ -93,20 +93,19 @@ async def execute_browser_tasks(headless: bool = True, random_delay: bool = Fals
 
         # Handle Epic Games authentication
         logger.debug("Initiating Epic Games authentication")
-        agent = EpicAuthorization(page)
-        await agent.invoke()
+        auth_agent = EpicAuthorization(page)
+        await auth_agent.invoke()
         logger.debug("Authentication completed")
 
-        # Execute a free games collection on new page
+        # Execute a free games collection on the SAME page (单标签页贯穿始终，避免跨标签导致会话丢失)
         logger.debug("Starting free games collection process")
-        game_page = await browser.new_page()
-        agent = EpicAgent(game_page)
-        await agent.collect_epic_games()
+        claim_agent = EpicAgent(page)
+        await claim_agent.collect_epic_games()
         logger.debug("Free games collection completed")
 
         # 故意等待 3 秒，防止录像在成功的一瞬间戛然而止
         logger.debug("Holding page for 3 seconds to finalize video recording...")
-        await game_page.wait_for_timeout(3000)
+        await page.wait_for_timeout(3000)
 
         # Cleanup browser resources
         logger.debug("Cleaning up browser resources")
@@ -129,9 +128,16 @@ async def deploy():
     """
     headless = True
 
-    # Log current configuration for debugging
+    # Log current configuration for debugging (脱敏敏感信息)
     sj = settings.model_dump(mode="json")
     sj["headless"] = headless
+    if sj.get("BARK_URL"):
+        parts = sj["BARK_URL"].rsplit("/", 1)
+        if len(parts) == 2 and len(parts[1]) > 6:
+            sj["BARK_URL"] = f"{parts[0]}/{parts[1][:4]}****{parts[1][-2:]}"
+        else:
+            sj["BARK_URL"] = "https://****"
+
     logger.debug(
         f"Starting deployment with configuration: {json.dumps(sj, indent=2, ensure_ascii=False)}"
     )

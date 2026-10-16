@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from contextlib import suppress
 from json import JSONDecodeError
+import re
 from typing import List
 
 import httpx
@@ -23,6 +24,7 @@ from models import OrderItem, Order
 from models import PromotionGame
 from settings import settings, RUNTIME_DIR
 from utils import send_bark_notification
+from app.services.epic_authorization_service import EpicAuthorization
 
 URL_CLAIM = "https://store.epicgames.com/en-US/free-games"
 URL_LOGIN = (
@@ -124,17 +126,30 @@ class EpicAgent:
         await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
         await self.page.wait_for_timeout(2000)
 
-        # 检查是否为未登录态 (存在 Sign in 按钮)
-        sign_in_btn = self.page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In')] | //header//span[text()='Sign in' or text()='Sign In']").first
+        # 检查是否为未登录态 (存在明确的 Sign In 按钮)
+        sign_in_btn = self.page.locator(
+            "//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+            "//header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+            "//header//span[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+            "a[role='button']:has-text('Sign In')"
+        ).first
         with suppress(Exception):
             if await sign_in_btn.is_visible():
                 logger.error("❌ 无法领取：检测到当前页面存在 'Sign in' 按钮，登录会话已失效")
                 return False
 
-        status = await self.page.locator("//egs-navigation").get_attribute("isloggedin")
-        if status == "false":
-            logger.error("❌ context cookies is not available")
+        nav = self.page.locator("//egs-navigation").first
+        status = None
+        display_name = None
+        with suppress(Exception):
+            status = await nav.get_attribute("isloggedin")
+            display_name = await nav.get_attribute("displayname")
+
+        # 只有 status 为 true 且 displayname 存在且不为 'null' 时才是有效会话
+        if status != "true" or not display_name or display_name.lower() == "null":
+            logger.error(f"❌ 无法领取：登录会话无效 (status={status}, displayname={display_name})")
             return False
+
         self._ctx_cookies_is_available = True
         await self._check_orders()
         if not self._promotions:
@@ -147,7 +162,13 @@ class EpicAgent:
             return
 
         if not self._ctx_cookies_is_available:
-            return
+            logger.warning("Session cookies not available, attempting re-authorization...")
+            auth = EpicAuthorization(self.page)
+            if await auth.invoke():
+                self._ctx_cookies_is_available = True
+            else:
+                logger.error("Re-authorization failed, aborting task.")
+                return
 
         if not self._promotions:
             await self._check_orders()
@@ -224,9 +245,9 @@ class EpicGames:
         wpc = page.frame_locator(iframe_selector).first
 
         logger.debug("Looking for purchase/checkout button...")
-        place_order_btn = wpc.locator("button", has_text="PLACE ORDER")
-        confirm_btn = wpc.locator("//button[contains(@class, 'payment-confirm__btn')]")
-        add_to_library_btn = wpc.locator("button", has_text="Add to library")
+        place_order_btn = wpc.locator("button").filter(has_text=re.compile(r"^(PLACE ORDER|Place Order|下订单)$", re.I)).first
+        confirm_btn = wpc.locator("button[class*='payment-confirm__btn'], button[data-testid*='confirm-order']").first
+        add_to_library_btn = wpc.locator("button").filter(has_text=re.compile(r"^(Add to library|Add to Library|添加到库)$", re.I)).first
         
         combined_btn = place_order_btn.or_(confirm_btn).or_(add_to_library_btn)
         try:
@@ -342,6 +363,7 @@ class EpicGames:
 
         for url in urls:
             await page.goto(url, wait_until="load")
+            await page.wait_for_timeout(2000)
 
             # 404 检测
             title = await page.title()
@@ -351,47 +373,96 @@ class EpicGames:
                 skipped_urls.add(url)
                 continue
 
+            # 处理 Cookie 弹窗（若存在则关闭，防止阻挡点击）
+            try:
+                cookie_btn = page.locator(
+                    "#onetrust-accept-btn-handler, button:has-text('Accept All Cookies'), button:has-text('全部接受')"
+                ).first
+                with suppress(Exception):
+                    if await cookie_btn.is_visible(timeout=2000):
+                        await cookie_btn.click()
+            except Exception:
+                pass
+
             # 处理年龄限制弹窗
             try:
-                continue_btn = page.locator("//button//span[text()='Continue']")
+                continue_btn = page.locator("//button//span[text()='Continue'] | button:has-text('Continue')").first
                 with suppress(Exception):
-                    await continue_btn.wait_for(state="visible", timeout=5000)
-                if await continue_btn.is_visible():
-                    await continue_btn.click()
+                    if await continue_btn.is_visible(timeout=3000):
+                        await continue_btn.click()
             except Exception:
-                pass 
+                pass
 
+            # 严格登录态检测与就地修复：检查是否处于未登录状态
+            sign_in_btn = page.locator(
+                "//header//button[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "//header//a[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "//header//span[contains(., 'Sign in') or contains(., 'Sign In') or contains(., '登录')] | "
+                "a[role='button']:has-text('Sign In')"
+            ).first
 
-            # 检测是否处于未登录状态
-            sign_in_btn = page.locator("//header//button[contains(., 'Sign in') or contains(., 'Sign In')] | //header//a[contains(., 'Sign in') or contains(., 'Sign In')] | //header//span[text()='Sign in' or text()='Sign In']").first
+            needs_login = False
             with suppress(Exception):
                 if await sign_in_btn.is_visible():
-                    logger.error(f"❌ 警告：进入游戏页面检测到未登录状态 (存在 Sign in 按钮)，无法领取 {url}")
+                    needs_login = True
+
+            if not needs_login:
+                nav = page.locator("//egs-navigation").first
+                with suppress(Exception):
+                    status = await nav.get_attribute("isloggedin")
+                    display_name = await nav.get_attribute("displayname")
+                    if status != "true" or not display_name or display_name.lower() == "null":
+                        needs_login = True
+
+            if needs_login:
+                logger.warning(f"⚠️ 进入游戏页面检测到未登录状态，尝试就地重新登录... ({url})")
+                auth = EpicAuthorization(page)
+                if await auth._login():
+                    logger.success("就地登录成功，重新加载游戏页面...")
+                    await page.goto(url, wait_until="load")
+                    await page.wait_for_timeout(2000)
+                else:
+                    logger.error(f"❌ 就地登录失败，无法领取 {url}")
                     skipped_urls.add(url)
                     continue
 
-            # 1. 尝试找到所有可能的“主按钮”
-            # Epic 按钮通常有 'purchase-cta-button' 这个 TestID
-            purchase_btn = page.locator("//button[@data-testid='purchase-cta-button']").first
+            # 1. 尝试找到主按钮或库中状态
+            # 综合定位器：优先 data-testid，再放宽至包含 Get / In Library 等关键词的按钮
+            purchase_btn = (
+                page.locator("button[data-testid='purchase-cta-button']")
+                .or_(page.locator("[data-testid='purchase-cta-button'] button"))
+                .or_(page.locator("[data-testid='purchase-cta-button']"))
+                .or_(
+                    page.locator("button, a[role='button']").filter(
+                        has_text=re.compile(
+                            r"^\s*(Get|GET|获取|In Library|IN LIBRARY|Owned|OWNED|已在库中|已拥有)\s*$",
+                            re.I,
+                        )
+                    )
+                )
+                .first
+            )
 
-            # 2. 如果没找到主按钮，尝试找“库中”状态
             try:
                 with suppress(Exception):
-                    await purchase_btn.wait_for(state="visible", timeout=15000)
+                    await purchase_btn.wait_for(state="visible", timeout=12000)
                 if not await purchase_btn.is_visible():
-                    # 备选选择器：有时按钮没有 data-testid，直接查找侧边栏内的 Get / 获取 按钮
-                    alt_btn = page.locator("//aside//button[contains(., 'Get') or contains(., 'GET') or contains(., '获取')]").first
+                    # 备选检查 1：购买卡片或侧边栏是否明确标注已拥有
+                    library_badge = page.locator(
+                        "aside, [data-component='PurchaseCard'], [data-testid='purchase-cta-button']"
+                    ).filter(has_text=re.compile(r"(In Library|Owned|已在库中|已拥有)", re.I)).first
+                    if await library_badge.count() > 0 and await library_badge.is_visible():
+                        logger.success(f"Already in the library (Purchase Area Scan) - {url=}")
+                        skipped_urls.add(url)
+                        continue
+
+                    # 备选检查 2：任意可见的 Get / 获取 按钮
+                    alt_btn = page.locator("button, a[role='button']").filter(
+                        has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
+                    ).first
                     if await alt_btn.is_visible():
                         purchase_btn = alt_btn
                     else:
-                        # 仅在侧边栏购买区域精确检查是否在库中，绝不扫描全页 body（防止匹配底部版权文字 Owned）
-                        aside = page.locator("aside, div[data-component='PurchaseCard']").first
-                        if await aside.count() > 0:
-                            aside_text = (await aside.text_content() or "").upper()
-                            if "IN LIBRARY" in aside_text or "OWNED" in aside_text:
-                                logger.success(f"Already in the library (Purchase Area Scan) - {url=}")
-                                skipped_urls.add(url)
-                                continue
                         logger.warning(f"Could not find any purchase button - {url=}")
                         await self._save_debug_screenshot(page, "skip_no_button")
                         skipped_urls.add(url)
@@ -401,57 +472,91 @@ class EpicGames:
                 skipped_urls.add(url)
                 continue
 
-            # 3. 获取按钮文字
+            # 2. 获取按钮文字
             btn_text = await purchase_btn.text_content()
-            if not btn_text: btn_text = ""
+            if not btn_text:
+                btn_text = ""
             btn_text_upper = btn_text.strip().upper()
-            
+
             logger.debug(f"👉 Found Button: '{btn_text}'")
 
-            # 4. 黑名单检查：只有这些情况绝对不能点
-            # 如果是 'IN LIBRARY', 'OWNED', 'UNAVAILABLE', 'COMING SOON', 'REQUIRES BASE GAME', 'BASE GAME' -> 跳过
-            if any(s in btn_text_upper for s in ["IN LIBRARY", "OWNED", "UNAVAILABLE", "COMING SOON", "REQUIRES BASE GAME", "BASE GAME"]):
-                logger.success(f"Game status is '{btn_text}' - Skipping.")
-                skipped_urls.add(url)  # 明确标记为已跳过，不发通知
+            # 3. 黑名单检查：只有这些情况绝对不能点
+            if any(
+                s in btn_text_upper
+                for s in [
+                    "IN LIBRARY",
+                    "OWNED",
+                    "UNAVAILABLE",
+                    "COMING SOON",
+                    "REQUIRES BASE GAME",
+                    "BASE GAME",
+                    "已在库中",
+                    "已拥有",
+                ]
+            ):
+                logger.success(f"Game status is '{btn_text}' - Skipping. - {url=}")
+                skipped_urls.add(url)
                 continue
 
-            # 定义一个内部辅助函数，点击并检测弹窗
-            async def _click_and_check_modal():
-                await purchase_btn.click()
-                # 检测点击后是否弹出了 "Device not supported" 等拦截弹窗
+            # 内部辅助函数：点击并检测拦截弹窗
+            async def _click_and_check_modal(target):
+                await target.click()
+                await page.wait_for_timeout(1000)
                 try:
-                    continue_btn = page.locator("div[role='dialog'] button").filter(has_text="Continue")
+                    continue_dialog_btn = (
+                        page.locator("div[role='dialog'] button, [aria-modal='true'] button")
+                        .filter(has_text=re.compile(r"(Continue|继续)", re.I))
+                        .first
+                    )
                     with suppress(Exception):
-                        await continue_btn.wait_for(state="visible", timeout=2000)
-                    if await continue_btn.is_visible():
-                        logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
-                        await continue_btn.click()
-                        await page.wait_for_timeout(1000)
+                        if await continue_dialog_btn.is_visible(timeout=3000):
+                            logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
+                            await continue_dialog_btn.click()
+                            await page.wait_for_timeout(1000)
                 except Exception:
                     pass
 
-            # 5. 白名单检查 (Add to Cart 特殊处理)
-            # 如果包含 'CART'，说明是加入购物车流程
+            # 4. 白名单检查 (Add to Cart 特殊处理)
             if "CART" in btn_text_upper:
                 logger.debug(f"🛒 Logic: Add To Cart - {url=}")
-                await _click_and_check_modal()
+                await _click_and_check_modal(purchase_btn)
                 has_pending_cart_items = True
                 continue
-            
-            # 6. 默认处理 (盲点逻辑)
-            # 只要不是黑名单，也不是购物车，统统当做 "Get/Purchase" 直接点击！
-            # 不管它写的是 'Get', 'Free', 'Purchase', 'Buy Now'，只要 API 说是免费的，我们就点！
+
+            # 5. 盲点领取逻辑 (Get / Free / Purchase / Buy Now)
             logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
-            await _click_and_check_modal()
-            
-            # 点击后，转入即时结账流程
+            await _click_and_check_modal(purchase_btn)
+
+            # 检测点击后是否被跳转到了登录页
+            if "/id/login" in page.url:
+                logger.warning(f"⚠️ 点击购买后被重定向到登录页面，尝试就地重新登录... ({url})")
+                auth = EpicAuthorization(page)
+                if await auth._login():
+                    logger.success("就地登录成功，重新加载游戏页面并再次尝试领取...")
+                    await page.goto(url, wait_until="load")
+                    await page.wait_for_timeout(2000)
+                    try:
+                        retry_btn = page.locator("button, a[role='button']").filter(
+                            has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
+                        ).first
+                        if await retry_btn.is_visible(timeout=5000):
+                            await _click_and_check_modal(retry_btn)
+                    except Exception:
+                        pass
+
+            # 转入即时结账流程
             success = await self._handle_instant_checkout(page)
             if not success:
                 logger.info(f"Retrying instant checkout for {url}...")
                 try:
                     await page.reload(wait_until="domcontentloaded", timeout=60000)
-                    await _click_and_check_modal()
-                    success = await self._handle_instant_checkout(page)
+                    await page.wait_for_timeout(2000)
+                    retry_btn = page.locator("button, a[role='button']").filter(
+                        has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
+                    ).first
+                    if await retry_btn.is_visible(timeout=5000):
+                        await _click_and_check_modal(retry_btn)
+                        success = await self._handle_instant_checkout(page)
                 except Exception as e:
                     logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
                     success = False
@@ -524,9 +629,17 @@ class EpicGames:
                 logger.warning("Failed to collect cart games")
                 # 购物车结算失败时，所有在购物车里的游戏都没有领取成功
                 return []
-        else:
-            logger.success("🎉 Process completed (Instant claimed or already owned)")
-
-        # 只返回未被跳过（即真正尝试领取）的游戏
+        # 计算本次真正成功的游戏与跳过的游戏
         claimed = [p for p in promotions if p.url not in skipped_urls]
+        skipped = [p for p in promotions if p.url in skipped_urls]
+
+        if claimed:
+            titles = "、".join([f"《{p.title}》" for p in claimed])
+            logger.success(f"🎉 本次成功领取 {len(claimed)} 款游戏: {titles}")
+        elif skipped:
+            titles = "、".join([f"《{p.title}》" for p in skipped])
+            logger.info(f"ℹ️ 本次未领取新游戏，以下游戏已在库中或被跳过: {titles}")
+        else:
+            logger.info("ℹ️ 没有待领取的游戏")
+
         return claimed
