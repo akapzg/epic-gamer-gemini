@@ -243,19 +243,62 @@ class EpicGames:
                 await accept.click()
 
     @staticmethod
+    async def _find_checkout_button(page: Page, wpc: FrameLocator):
+        btn_regex = re.compile(r"(Add to library|添加到库|Place Order|下订单)", re.I)
+
+        # 1. 尝试在 wpc (购买主 iframe) 中查找
+        try:
+            btn = wpc.locator("button, [role='button']").filter(has_text=btn_regex).first
+            if await btn.is_visible():
+                return wpc, btn
+        except Exception:
+            pass
+
+        # 2. 尝试在顶级 page DOM 中查找
+        try:
+            btn = page.locator("button, [role='button']").filter(has_text=btn_regex).first
+            if await btn.is_visible():
+                return page, btn
+        except Exception:
+            pass
+
+        # 3. 遍历 page.frames 中所有 iframe (深度穿透，防止多层嵌套或域名变动)
+        for f in page.frames:
+            if f.is_detached():
+                continue
+            try:
+                btn = f.locator("button, [role='button']").filter(has_text=btn_regex).first
+                if await btn.is_visible():
+                    return f, btn
+            except Exception:
+                pass
+
+        # 4. CSS 选择器兜底
+        css_candidates = [
+            "button[class*='payment-confirm__btn']",
+            "button[data-testid*='confirm-order']",
+            "button[data-testid*='purchase-cta-button']",
+            "button.btn-primary",
+        ]
+        for sel in css_candidates:
+            with suppress(Exception):
+                btn = wpc.locator(sel).first
+                if await btn.is_visible():
+                    return wpc, btn
+            with suppress(Exception):
+                btn = page.locator(sel).first
+                if await btn.is_visible():
+                    return page, btn
+
+        return None, None
+
+    @staticmethod
     async def _active_purchase_container(page: Page, agent: AgentV = None):
         logger.debug("Scanning for purchase iframe...")
-        iframe_selector = "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
+        iframe_selector = "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase') or contains(@src, 'checkout')]"
         wpc = page.frame_locator(iframe_selector).first
 
         logger.debug("Looking for purchase/checkout button or CAPTCHA...")
-        # 按钮正则：覆盖 "Add to library", "PLACE ORDER", "添加到库", "下订单" 等
-        btn_regex = re.compile(r"^\s*(Add to library|Add to Library|添加到库|PLACE ORDER|Place Order|下订单)\s*$", re.I)
-
-        place_order_btn = wpc.locator("button").filter(has_text=btn_regex).first
-        confirm_btn = wpc.locator("button[class*='payment-confirm__btn'], button[data-testid*='confirm-order']").first
-        page_checkout_btn = page.locator("button").filter(has_text=btn_regex).first
-
         start_time = time.time()
         max_wait = 60.0
 
@@ -271,6 +314,7 @@ class EpicGames:
                     logger.warning("⚠️ 检测到阻挡弹窗 (Device not supported)，点击 Continue...")
                     await continue_dialog_btn.click()
                     await page.wait_for_timeout(1000)
+                    start_time = time.time()
             except Exception:
                 pass
 
@@ -297,6 +341,7 @@ class EpicGames:
                                 logger.info("⚡ 检测到 hCaptcha 复选框，尝试点击勾选...")
                                 await cb.click()
                                 await page.wait_for_timeout(1000)
+                                start_time = time.time()
                                 break
 
             if has_visible_challenge and agent is not None:
@@ -306,21 +351,19 @@ class EpicGames:
                     logger.info(f"✅ 人机验证求解返回: {res}，等待结算按钮就绪...")
                 except Exception as ce:
                     logger.warning(f"人机验证求解过程异常: {ce}")
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(3000)
+                # 关键修复：人机验证耗时可能达数分钟，求解完成后必须重置 start_time，重新赋予完整的 60 秒等待结算按钮！
+                start_time = time.time()
+                continue
 
-            # 3. 如果结算按钮已经在 iframe 或页面 DOM 中出现，立即返回（无需等待验证码）！
-            try:
-                if await place_order_btn.is_visible():
-                    logger.debug("✅ Found checkout button in purchase iframe")
-                    return wpc, place_order_btn
-                if await confirm_btn.is_visible():
-                    logger.debug("✅ Found confirm button via CSS in purchase iframe")
-                    return wpc, confirm_btn
-                if await page_checkout_btn.is_visible():
-                    logger.debug("✅ Found checkout button in top-level page DOM")
-                    return page, page_checkout_btn
-            except Exception:
-                pass
+            # 3. 查找结算/添加入库按钮 (穿透主 iframe、顶级 DOM 以及所有子 frames)
+            container, checkout_btn = await EpicGames._find_checkout_button(page, wpc)
+            if checkout_btn:
+                btn_name = ""
+                with suppress(Exception):
+                    btn_name = await checkout_btn.text_content()
+                logger.success(f"✅ 成功定位到结算按钮: '{btn_name.strip()}'")
+                return container, checkout_btn
 
             # 4. 检查是否有需要勾选的条款 (如欧盟撤回权声明、隐私条款)
             try:

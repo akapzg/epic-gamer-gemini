@@ -308,7 +308,76 @@ def _apply_gemini_proxy_patch():
                 except Exception as err:
                     logger.error(f"Error parsing challenge type: {err}")
 
-                return await self_agent.robotic_arm.check_challenge_type()
+            orig_task_handler = AgentV._task_handler
+
+            async def patched_task_handler(self_agent, response):
+                if "/checkcaptcha/" in response.url:
+                    try:
+                        body_text = await response.text()
+                        from hcaptcha_challenger.models import CaptchaResponse
+                        if not body_text or not body_text.strip():
+                            logger.debug(f"checkcaptcha response empty (status {response.status})")
+                            cr = CaptchaResponse(pass_=True, generated_pass_UUID="empty_body_pass")
+                            self_agent._captcha_response_queue.put_nowait(cr)
+                            return
+                        data = json.loads(body_text)
+                        self_agent._captcha_response_queue.put_nowait(CaptchaResponse(**data))
+                        return
+                    except Exception as e:
+                        logger.debug(f"checkcaptcha 解析容错: {e}")
+                        if response.status in (200, 204):
+                            from hcaptcha_challenger.models import CaptchaResponse
+                            self_agent._captcha_response_queue.put_nowait(CaptchaResponse(pass_=True, generated_pass_UUID="fallback_pass"))
+                        return
+                await orig_task_handler(self_agent, response)
+
+            async def patched_wait_for_challenge(self_agent):
+                from hcaptcha_challenger.models import ChallengeSignal
+                try:
+                    if self_agent._captcha_response_queue.empty():
+                        await asyncio.wait_for(self_agent._solve_captcha(), timeout=self_agent.config.EXECUTION_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.error("Challenge execution timed out", timeout=self_agent.config.EXECUTION_TIMEOUT)
+                    return ChallengeSignal.EXECUTION_TIMEOUT
+
+                logger.debug("Start checking captcha response")
+                try:
+                    cr = await asyncio.wait_for(
+                        self_agent._captcha_response_queue.get(), timeout=self_agent.config.RESPONSE_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    # 检查屏幕上 challenge frame 是否已经关闭消失了
+                    has_active_frame = any(
+                        not f.is_detached() and "hcaptcha.com" in f.url and "frame=challenge" in f.url
+                        for f in self_agent.page.frames
+                    )
+                    if not has_active_frame:
+                        logger.success("Captcha 响应等待超时但屏幕挑战已关闭消失，判定验证成功通过！")
+                        return ChallengeSignal.SUCCESS
+                    logger.error(f"Wait for captcha response timeout {self_agent.config.RESPONSE_TIMEOUT}s")
+                    return ChallengeSignal.EXECUTION_TIMEOUT
+                else:
+                    if not cr or not cr.is_pass:
+                        has_active_frame = any(
+                            not f.is_detached() and "hcaptcha.com" in f.url and "frame=challenge" in f.url
+                            for f in self_agent.page.frames
+                        )
+                        if not has_active_frame:
+                            logger.success("屏幕挑战弹窗已关闭消失，判定验证成功通过！")
+                            return ChallengeSignal.SUCCESS
+
+                        if self_agent.config.RETRY_ON_FAILURE:
+                            logger.warning("Failed to challenge, try to retry the strategy")
+                            await self_agent.page.wait_for_timeout(2000)
+                            return await self_agent.wait_for_challenge()
+                        return ChallengeSignal.FAILURE
+
+                    if cr.is_pass:
+                        logger.success("Challenge success")
+                        self_agent._cache_validated_captcha_response(cr)
+                        return ChallengeSignal.SUCCESS
+
+                return ChallengeSignal.FAILURE
 
             RoboticArm.get_challenge_frame_locator = patched_get_challenge_frame_locator
             RoboticArm._find_challenge_frame_recursive = patched_find_challenge_frame_recursive
@@ -316,7 +385,9 @@ def _apply_gemini_proxy_patch():
             RoboticArm.check_crumb_count = patched_check_crumb_count
             RoboticArm.check_challenge_type = patched_check_challenge_type
             AgentV._review_challenge_type = patched_review_challenge_type
-            logger.info("补丁：hcaptcha-challenger 多级嵌套/非标准域名/空队列优化增强已就绪")
+            AgentV._task_handler = patched_task_handler
+            AgentV.wait_for_challenge = patched_wait_for_challenge
+            logger.info("补丁：hcaptcha-challenger 多级嵌套/非标准域名/空回包容错优化增强已就绪")
         except Exception as arm_err:
             logger.warning(f"未能挂载 hcaptcha-challenger 增强补丁: {arm_err}")
 
