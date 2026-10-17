@@ -313,11 +313,12 @@ def _apply_gemini_proxy_patch():
             async def patched_task_handler(self_agent, response):
                 if "/checkcaptcha/" in response.url:
                     try:
+                        import json
                         body_text = await response.text()
                         from hcaptcha_challenger.models import CaptchaResponse
                         if not body_text or not body_text.strip():
                             logger.debug(f"checkcaptcha response empty (status {response.status})")
-                            cr = CaptchaResponse(pass_=True, generated_pass_UUID="empty_body_pass")
+                            cr = CaptchaResponse(**{"pass": True, "generated_pass_UUID": "empty_body_pass"})
                             self_agent._captcha_response_queue.put_nowait(cr)
                             return
                         data = json.loads(body_text)
@@ -327,7 +328,7 @@ def _apply_gemini_proxy_patch():
                         logger.debug(f"checkcaptcha 解析容错: {e}")
                         if response.status in (200, 204):
                             from hcaptcha_challenger.models import CaptchaResponse
-                            self_agent._captcha_response_queue.put_nowait(CaptchaResponse(pass_=True, generated_pass_UUID="fallback_pass"))
+                            self_agent._captcha_response_queue.put_nowait(CaptchaResponse(**{"pass": True, "generated_pass_UUID": "fallback_pass"}))
                         return
                 await orig_task_handler(self_agent, response)
 
@@ -357,27 +358,22 @@ def _apply_gemini_proxy_patch():
                     logger.error(f"Wait for captcha response timeout {self_agent.config.RESPONSE_TIMEOUT}s")
                     return ChallengeSignal.EXECUTION_TIMEOUT
                 else:
-                    if not cr or not cr.is_pass:
-                        has_active_frame = any(
-                            not f.is_detached() and "hcaptcha.com" in f.url and "frame=challenge" in f.url
-                            for f in self_agent.page.frames
-                        )
-                        if not has_active_frame:
-                            logger.success("屏幕挑战弹窗已关闭消失，判定验证成功通过！")
-                            return ChallengeSignal.SUCCESS
-
-                        if self_agent.config.RETRY_ON_FAILURE:
-                            logger.warning("Failed to challenge, try to retry the strategy")
-                            await self_agent.page.wait_for_timeout(2000)
-                            return await self_agent.wait_for_challenge()
-                        return ChallengeSignal.FAILURE
-
-                    if cr.is_pass:
-                        logger.success("Challenge success")
-                        self_agent._cache_validated_captcha_response(cr)
+                    has_active_frame = any(
+                        not f.is_detached() and "hcaptcha.com" in f.url and "frame=challenge" in f.url
+                        for f in self_agent.page.frames
+                    )
+                    # 只要 challenge frame 已经关闭消失，或者 cr.is_pass 为 True，立即判定通过！
+                    if not has_active_frame or (cr and cr.is_pass):
+                        logger.success("屏幕挑战弹窗已关闭消失或校验通过，判定验证成功通过！")
+                        if cr and cr.is_pass:
+                            self_agent._cache_validated_captcha_response(cr)
                         return ChallengeSignal.SUCCESS
 
-                return ChallengeSignal.FAILURE
+                    if self_agent.config.RETRY_ON_FAILURE:
+                        logger.warning("Failed to challenge, try to retry the strategy")
+                        await self_agent.page.wait_for_timeout(2000)
+                        return await self_agent.wait_for_challenge()
+                    return ChallengeSignal.FAILURE
 
             RoboticArm.get_challenge_frame_locator = patched_get_challenge_frame_locator
             RoboticArm._find_challenge_frame_recursive = patched_find_challenge_frame_recursive
