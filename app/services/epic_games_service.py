@@ -11,6 +11,7 @@ import json
 from contextlib import suppress
 from json import JSONDecodeError
 import re
+import time
 from typing import List
 
 import httpx
@@ -242,32 +243,66 @@ class EpicGames:
                 await accept.click()
 
     @staticmethod
-    async def _active_purchase_container(page: Page):
+    async def _active_purchase_container(page: Page, agent: AgentV = None):
         logger.debug("Scanning for purchase iframe...")
         iframe_selector = "//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]"
         wpc = page.frame_locator(iframe_selector).first
 
-        logger.debug("Looking for purchase/checkout button...")
+        logger.debug("Looking for purchase/checkout button or CAPTCHA...")
         place_order_btn = wpc.locator("button").filter(has_text=re.compile(r"^(PLACE ORDER|Place Order|下订单)$", re.I)).first
         confirm_btn = wpc.locator("button[class*='payment-confirm__btn'], button[data-testid*='confirm-order']").first
         add_to_library_btn = wpc.locator("button").filter(has_text=re.compile(r"^(Add to library|Add to Library|添加到库)$", re.I)).first
-        
-        combined_btn = place_order_btn.or_(confirm_btn).or_(add_to_library_btn)
-        try:
-            await expect(combined_btn).to_be_visible(timeout=15000)
-        except AssertionError:
-            logger.warning("Primary buttons not found in iframe.")
-            raise AssertionError("Could not find Place Order or Add to Library button in iframe")
 
-        if await place_order_btn.is_visible():
-            logger.debug("✅ Found 'PLACE ORDER' button via text match")
-            return wpc, place_order_btn
-        elif await confirm_btn.is_visible():
-            logger.debug("✅ Found button via CSS class match")
-            return wpc, confirm_btn
-        else:
-            logger.debug("✅ Found 'Add to library' button for free game checkout")
-            return wpc, add_to_library_btn
+        start_time = time.time()
+        max_wait = 35.0
+
+        while time.time() - start_time < max_wait:
+            # 1. 优先检测是否有人机验证码遮挡（若有，先调用 AI 模型求解）
+            has_captcha = False
+            try:
+                if any("hcaptcha.com" in f.url for f in page.frames):
+                    has_captcha = True
+                elif await page.locator("iframe[src*='hcaptcha.com'], iframe[title*='hCaptcha']").count() > 0:
+                    has_captcha = True
+            except Exception:
+                pass
+
+            if has_captcha and agent is not None:
+                logger.info("⚡ 检测到结算前弹出人机验证码，正在调用 Gemini AI 求解...")
+                try:
+                    await agent.wait_for_challenge()
+                    logger.success("✅ 人机验证求解完成，继续等待结算按钮就绪...")
+                    await page.wait_for_timeout(2000)
+                except Exception as ce:
+                    logger.warning(f"人机验证求解过程异常: {ce}")
+
+            # 2. 检查结算按钮是否已出现并可见
+            try:
+                if await place_order_btn.is_visible():
+                    logger.debug("✅ Found 'PLACE ORDER' button via text match")
+                    return wpc, place_order_btn
+                if await confirm_btn.is_visible():
+                    logger.debug("✅ Found button via CSS class match")
+                    return wpc, confirm_btn
+                if await add_to_library_btn.is_visible():
+                    logger.debug("✅ Found 'Add to library' button for free game checkout")
+                    return wpc, add_to_library_btn
+            except Exception:
+                pass
+
+            # 3. 检查是否有需要勾选的条款 (如欧盟撤回权声明、隐私条款)
+            try:
+                terms_checkbox = wpc.locator("input[type='checkbox']").first
+                if await terms_checkbox.is_visible():
+                    if not await terms_checkbox.is_checked():
+                        await terms_checkbox.check(force=True)
+            except Exception:
+                pass
+
+            await page.wait_for_timeout(1000)
+
+        logger.warning("Primary buttons not found in iframe within timeout.")
+        raise AssertionError("Could not find Place Order or Add to Library button in iframe")
 
     @staticmethod
     async def _uk_confirm_order(wpc: FrameLocator):
@@ -278,84 +313,115 @@ class EpicGames:
                 await accept.click()
                 return True
 
+    async def _verify_library_status(self, page: Page) -> bool:
+        """
+        验证游戏是否真实成功入库：
+        等待结算弹窗消失，检查游戏详情页的主按钮状态是否变为 In Library / 已在库中 / Owned。
+        若未变化，尝试刷新页面再次校验。只有按钮确实为已拥有状态，才返回 True。
+        """
+        logger.debug("正在执行入库状态终检验...")
+        # 等待结算 iframe 关闭 (最多等 8 秒)
+        with suppress(Exception):
+            iframe_locator = page.locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
+            await iframe_locator.wait_for(state="hidden", timeout=8000)
+
+        for attempt in range(3):
+            try:
+                cta_btn = page.locator(
+                    "button[data-testid='purchase-cta-button'], "
+                    "[data-testid='purchase-cta-button'] button, "
+                    "button, a[role='button']"
+                ).filter(
+                    has_text=re.compile(
+                        r"^\s*(In Library|IN LIBRARY|Owned|OWNED|已在库中|已拥有|Get|GET|获取)\s*$",
+                        re.I,
+                    )
+                ).first
+
+                if await cta_btn.is_visible(timeout=3000):
+                    btn_text = (await cta_btn.text_content() or "").strip()
+                    btn_text_upper = btn_text.upper()
+                    if any(kw in btn_text_upper for kw in ["IN LIBRARY", "OWNED", "已在库中", "已拥有"]):
+                        logger.success(f"🎉 入库校验成功：游戏详情页按钮已变为 '{btn_text}'")
+                        await self._save_debug_screenshot(page, "success_in_library_confirmed")
+                        return True
+                    elif any(kw in btn_text_upper for kw in ["GET", "获取"]):
+                        logger.warning(f"入库校验检测到按钮仍为 '{btn_text}' (尚未成功入库)")
+            except Exception as e:
+                logger.debug(f"按钮状态检测尝试 {attempt + 1}: {e}")
+
+            if attempt == 1:
+                # 第二次尝试时主动刷新页面，拉取最新状态
+                with suppress(Exception):
+                    logger.debug("刷新页面以拉取最新商品状态...")
+                    await page.reload(wait_until="domcontentloaded", timeout=15000)
+                    await page.wait_for_timeout(2000)
+
+            await page.wait_for_timeout(2000)
+
+        logger.error("❌ 入库核验失败：未能确认游戏已进入库中")
+        await self._save_debug_screenshot(page, "fail_not_in_library")
+        return False
+
     async def _handle_instant_checkout(self, page: Page):
         logger.info("Triggering Instant Checkout Flow...")
         agent = AgentV(page=page, agent_config=settings)
 
         try:
-            wpc, payment_btn = await self._active_purchase_container(page)
-            logger.debug(f"Clicking payment button: {await payment_btn.text_content()}")
+            # 1. 查找结算容器与支付按钮（内含前置验证码自动求解）
+            wpc, payment_btn = await self._active_purchase_container(page, agent=agent)
+            btn_text = ""
+            with suppress(Exception):
+                btn_text = await payment_btn.text_content() or ""
+            logger.debug(f"Clicking payment button: {btn_text.strip()}")
 
             # 点击前截图（记录弹窗就绪状态）
             await self._save_debug_screenshot(page, "before_click")
 
             await payment_btn.click(force=True)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(2000)
 
+            # 2. 点击后检测是否触发了二阶段人机验证码
             try:
-                logger.debug("Checking for CAPTCHA...")
-                await agent.wait_for_challenge()
+                has_post_captcha = False
+                if any("hcaptcha.com" in f.url for f in page.frames):
+                    has_post_captcha = True
+                elif await page.locator("iframe[src*='hcaptcha.com'], iframe[title*='hCaptcha']").count() > 0:
+                    has_post_captcha = True
+
+                if has_post_captcha:
+                    logger.info("⚡ 点击结算后触发二阶段人机验证，正在调用 Gemini AI 求解...")
+                    await agent.wait_for_challenge()
+                else:
+                    # 快速轮询 3 秒看是否有验证码出现
+                    with suppress(Exception):
+                        await asyncio.wait_for(agent.wait_for_challenge(), timeout=3.0)
             except Exception as e:
-                logger.info(f"CAPTCHA detection skipped (Likely no CAPTCHA needed): {e}")
+                logger.debug(f"Post-click CAPTCHA check: {e}")
 
             # 处理完验证码后截图（记录中间状态）
             await self._save_debug_screenshot(page, "after_captcha")
 
-            try:
-                await page.wait_for_timeout(5000)
-                all_text = await page.locator("body").text_content()
-                if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library"]):
-                    logger.success("Instant Checkout: Confirmed via Page Text!")
-                    await self._save_debug_screenshot(page, "success_text_confirmed")
-                    return True
-
-                if not await payment_btn.is_visible():
-                    logger.success("Instant Checkout: Payment button disappeared (Success inferred)")
-                    await self._save_debug_screenshot(page, "success_btn_disappeared")
-                    return True
-            except Exception:
-                logger.success("Instant Checkout: Process finished (Iframe closed/redirected)")
-                await self._save_debug_screenshot(page, "success_redirected")
-                return True
-
-            with suppress(Exception):
-                await payment_btn.click(force=True)
-                await page.wait_for_timeout(2000)
-
-            logger.warning("Instant checkout: Could not confirm success. Marking as uncertain.")
-            await self._save_debug_screenshot(page, "uncertain_unconfirmed")
-            return False
+            # 3. 检查 iframe 中是否有明确的订单感谢信息
+            for _ in range(6):
+                try:
+                    iframe_body = page.frame_locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
+                    iframe_text = await iframe_body.locator("body").text_content() or ""
+                    if any(kw in iframe_text for kw in ["Thank you for your order", "Thanks for your order", "Thank You", "Thanks for buying"]):
+                        logger.success("Instant Checkout: Confirmed via Order Confirmation in iframe!")
+                        await self._save_debug_screenshot(page, "success_iframe_confirmed")
+                        return True
+                except Exception:
+                    # iframe 可能已关闭
+                    break
+                await page.wait_for_timeout(1000)
 
         except Exception as err:
-            # 针对部分免结账直接成功的游戏 (显示 "It's all yours" 或 "Thanks for your order")
-            try:
-                all_text = ""
-                with suppress(Exception):
-                    all_text += await page.locator("body").text_content() or ""
-                with suppress(Exception):
-                    iframe = page.frame_locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
-                    all_text += await iframe.locator("body").text_content() or ""
-                
-                if any(s in all_text for s in ["Thank you", "Success", "Owned", "In Library", "It's all yours", "Thanks for your order", "Add it to your library to get started"]):
-                    # To avoid false positive with the new checkout modal text itself when it's NOT clicked,
-                    # we must ensure we actually bypassed the button. 
-                    # If "Add it to your library to get started" is there, it means the modal is open but NOT clicked.
-                    if "Add it to your library to get started" in all_text and "Thank you" not in all_text and "Success" not in all_text:
-                        pass # Don't falsely claim success if we just see the prompt!
-                    else:
-                        logger.success("Instant Checkout: Bypassed Place Order, directly confirmed via Page Text!")
-                        await self._save_debug_screenshot(page, "success_bypassed_button")
-                        return True
-            except Exception:
-                pass
-
-            logger.warning(f"Instant checkout warning (Game might still be claimed): {err}")
+            logger.warning(f"Instant checkout process encountered exception: {err}")
             await self._save_debug_screenshot(page, "checkout_error")
-            try:
-                await page.reload(timeout=15000)
-            except Exception as reload_err:
-                logger.warning(f"Failed to reload page: {reload_err}")
-            return False
+
+        # 4. 终极入库实锤校验：核查详情页主按钮是否已变为 "In Library"
+        return await self._verify_library_status(page)
 
     async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> tuple[bool, set]:
         """返回 (has_pending_cart_items, skipped_urls)。
@@ -574,9 +640,12 @@ class EpicGames:
 
         try:
             logger.debug("Move to webPurchaseContainer iframe")
-            wpc, payment_btn = await self._active_purchase_container(self.page)
+            wpc, payment_btn = await self._active_purchase_container(self.page, agent=agent)
             logger.debug("Click payment button")
             await self._uk_confirm_order(wpc)
+            if payment_btn:
+                with suppress(Exception):
+                    await payment_btn.click(force=True)
             await agent.wait_for_challenge()
         except Exception as err:
             if retry_count >= max_retries:
