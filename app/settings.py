@@ -157,6 +157,169 @@ def _apply_gemini_proxy_patch():
         genai.files.AsyncFiles.upload = patched_upload
         genai.models.AsyncModels.generate_content = patched_generate
 
+        # 补丁：放宽 hcaptcha-challenger 的 challenge frame 识别与空队列优化
+        try:
+            from hcaptcha_challenger.agent.challenger import RoboticArm, AgentV
+            from hcaptcha_challenger.models import RequestType, ChallengeTypeEnum
+            from playwright.async_api import Frame
+            from contextlib import suppress
+            from uuid import uuid4
+
+            async def patched_get_challenge_frame_locator(self_arm) -> Frame | None:
+                # 1. 递归查找 main_frame 下的 challenge 候选 (放宽层级至 6)
+                candidate_frame = self_arm._find_challenge_frame_recursive(self_arm.page.main_frame, max_depth=6)
+                if candidate_frame:
+                    with suppress(Exception):
+                        challenge_view = candidate_frame.locator("//div[contains(@class, 'challenge-view')] | //div[contains(@class, 'task-image')] | body")
+                        if await challenge_view.first.is_visible():
+                            return candidate_frame
+
+                # 2. 从 page.frames 中全面匹配包含 frame=challenge 的 frame (支持 assets.hcaptcha.com)
+                challenge_frames = []
+                for frame in self_arm.page.frames:
+                    if "hcaptcha.com" in frame.url and "frame=challenge" in frame.url:
+                        challenge_frames.append(frame)
+
+                for frame in challenge_frames:
+                    with suppress(Exception):
+                        challenge_view = frame.locator("//div[contains(@class, 'challenge-view')] | //div[contains(@class, 'task-image')] | body")
+                        if await challenge_view.first.is_visible():
+                            return frame
+
+                if challenge_frames:
+                    return challenge_frames[0]
+
+                logger.error("Cannot find a valid challenge frame")
+                return None
+
+            def patched_find_challenge_frame_recursive(self_arm, frame: Frame, current_depth=0, max_depth=6) -> Frame | None:
+                if current_depth >= max_depth:
+                    return None
+                candidate_frames = []
+                for child_frame in frame.child_frames:
+                    if "hcaptcha.com" in child_frame.url and "frame=challenge" in child_frame.url:
+                        candidate_frames.append(child_frame)
+                    else:
+                        found_in_child = self_arm._find_challenge_frame_recursive(
+                            child_frame, current_depth + 1, max_depth
+                        )
+                        if found_in_child:
+                            return found_in_child
+                if candidate_frames:
+                    return candidate_frames[0]
+                return None
+
+            async def patched_click_checkbox(self_arm):
+                for f in self_arm.page.frames:
+                    if "hcaptcha.com" in f.url and "frame=checkbox" in f.url:
+                        with suppress(Exception):
+                            cb = f.locator("//div[@id='checkbox'] | #checkbox").first
+                            if await cb.is_visible():
+                                await self_arm.click_by_mouse(cb)
+                                return True
+                return False
+
+            async def patched_check_crumb_count(self_arm):
+                if isinstance(self_arm.signal_crumb_count, int) and self_arm.signal_crumb_count >= 1:
+                    return self_arm.signal_crumb_count
+                await self_arm.page.wait_for_timeout(500)
+                frame_challenge = await self_arm.get_challenge_frame_locator()
+                if not frame_challenge:
+                    return self_arm.config.MAX_CRUMB_COUNT
+                crumbs = frame_challenge.locator("//div[@class='Crumb']")
+                with suppress(Exception):
+                    crumbs_count = await crumbs.count()
+                    if crumbs_count:
+                        return crumbs_count
+                return self_arm.config.MAX_CRUMB_COUNT
+
+            async def patched_check_challenge_type(self_arm):
+                with suppress(Exception):
+                    await self_arm.page.wait_for_selector(self_arm.challenge_selector, timeout=1000)
+
+                frame_challenge = await self_arm.get_challenge_frame_locator()
+                if not frame_challenge:
+                    logger.error("check_challenge_type: 未能找到有效的 challenge frame")
+                    return None
+
+                samples = frame_challenge.locator("//div[@class='task-image']")
+                count = 0
+                with suppress(Exception):
+                    count = await samples.count()
+                if isinstance(count, int) and count == 9:
+                    return RequestType.IMAGE_LABEL_BINARY
+                if isinstance(count, int) and count == 0:
+                    tms = self_arm.config.WAIT_FOR_CHALLENGE_VIEW_TO_RENDER_MS * 1.5
+                    await self_arm.page.wait_for_timeout(tms)
+                    challenge_view = frame_challenge.locator("//div[@class='challenge-view']")
+                    cache_path = self_arm.config.cache_dir.joinpath(f"challenge_view/_artifacts/{uuid4()}.png")
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    await challenge_view.screenshot(type="png", path=cache_path)
+                    router_result = await self_arm._challenge_router(challenge_screenshot=cache_path)
+                    self_arm._challenge_prompt = router_result.challenge_prompt
+                    return router_result.challenge_type
+                return None
+
+            async def patched_review_challenge_type(self_agent):
+                # 如果队列为空，最多只等待 2.0 秒（避免因已弹出验证码或漏包而无谓干等 30 秒）
+                wait_sec = 2.0 if self_agent._captcha_payload_queue.empty() else 30.0
+                try:
+                    self_agent._captcha_payload = await asyncio.wait_for(
+                        self_agent._captcha_payload_queue.get(), timeout=wait_sec
+                    )
+                    await self_agent.page.wait_for_timeout(500)
+                except asyncio.TimeoutError:
+                    logger.debug("Captcha payload 等待完成，转入视觉 DOM 识别...")
+                    self_agent._captcha_payload = None
+
+                self_agent.robotic_arm.signal_crumb_count = None
+                self_agent.robotic_arm.captcha_payload = None
+                if not self_agent._captcha_payload:
+                    return await self_agent.robotic_arm.check_challenge_type()
+
+                try:
+                    request_type = self_agent._captcha_payload.request_type
+                    tasklist = self_agent._captcha_payload.tasklist
+                    tasklist_length = len(tasklist)
+                    self_agent.robotic_arm.captcha_payload = self_agent._captcha_payload
+                    match request_type:
+                        case RequestType.IMAGE_LABEL_BINARY:
+                            self_agent.robotic_arm.signal_crumb_count = int(tasklist_length / 9)
+                            return RequestType.IMAGE_LABEL_BINARY
+                        case RequestType.IMAGE_LABEL_AREA_SELECT:
+                            self_agent.robotic_arm.signal_crumb_count = tasklist_length
+                            max_shapes = self_agent._captcha_payload.request_config.max_shapes_per_image
+                            if not isinstance(max_shapes, int):
+                                return await self_agent.robotic_arm.check_challenge_type()
+                            return (
+                                ChallengeTypeEnum.IMAGE_LABEL_SINGLE_SELECT
+                                if max_shapes == 1
+                                else ChallengeTypeEnum.IMAGE_LABEL_MULTI_SELECT
+                            )
+                        case RequestType.IMAGE_DRAG_DROP:
+                            self_agent.robotic_arm.signal_crumb_count = tasklist_length
+                            return (
+                                ChallengeTypeEnum.IMAGE_DRAG_SINGLE
+                                if len(tasklist[0].entities) == 1
+                                else ChallengeTypeEnum.IMAGE_DRAG_MULTI
+                            )
+
+                    logger.warning(f"Unknown request_type: {request_type=}")
+                except Exception as err:
+                    logger.error(f"Error parsing challenge type: {err}")
+
+                return await self_agent.robotic_arm.check_challenge_type()
+
+            RoboticArm.get_challenge_frame_locator = patched_get_challenge_frame_locator
+            RoboticArm._find_challenge_frame_recursive = patched_find_challenge_frame_recursive
+            RoboticArm.click_checkbox = patched_click_checkbox
+            RoboticArm.check_crumb_count = patched_check_crumb_count
+            RoboticArm.check_challenge_type = patched_check_challenge_type
+            AgentV._review_challenge_type = patched_review_challenge_type
+            logger.info("补丁：hcaptcha-challenger 多级嵌套/非标准域名/空队列优化增强已就绪")
+        except Exception as arm_err:
+            logger.warning(f"未能挂载 hcaptcha-challenger 增强补丁: {arm_err}")
+
         _patch_applied = True
         logger.info("补丁成功挂载：中转地址注入 + 多图写保护 + Base64 内联已就绪")
 

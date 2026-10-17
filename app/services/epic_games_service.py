@@ -257,7 +257,7 @@ class EpicGames:
         page_checkout_btn = page.locator("button").filter(has_text=btn_regex).first
 
         start_time = time.time()
-        max_wait = 35.0
+        max_wait = 60.0
 
         while time.time() - start_time < max_wait:
             # 1. 优先检查阻碍性弹窗 (如 Device not supported / 年龄提示) 并自动点击 Continue
@@ -274,7 +274,41 @@ class EpicGames:
             except Exception:
                 pass
 
-            # 2. 核心：如果结算按钮已经在 iframe 或页面 DOM 中出现，立即返回（无需等待验证码）！
+            # 2. 深度穿透检测屏幕是否弹出了人机验证码 (无论嵌套多少层 iframe)
+            has_visible_challenge = False
+            for f in page.frames:
+                if not f.is_detached() and "hcaptcha.com" in f.url and "frame=challenge" in f.url:
+                    try:
+                        view = f.locator("//div[contains(@class, 'challenge-view')] | //div[contains(@class, 'task-image')] | body").first
+                        if await view.is_visible():
+                            has_visible_challenge = True
+                            break
+                    except Exception:
+                        has_visible_challenge = True
+                        break
+
+            # 同样检测是否有独立的 checkbox 需要点击勾选
+            if not has_visible_challenge:
+                for f in page.frames:
+                    if not f.is_detached() and "hcaptcha.com" in f.url and "frame=checkbox" in f.url:
+                        with suppress(Exception):
+                            cb = f.locator("//div[@id='checkbox'] | #checkbox").first
+                            if await cb.is_visible():
+                                logger.info("⚡ 检测到 hCaptcha 复选框，尝试点击勾选...")
+                                await cb.click()
+                                await page.wait_for_timeout(1000)
+                                break
+
+            if has_visible_challenge and agent is not None:
+                logger.info("⚡ 检测到屏幕弹出人机验证码 (frame=challenge)，正在调用 Gemini AI 求解...")
+                try:
+                    res = await agent.wait_for_challenge()
+                    logger.info(f"✅ 人机验证求解返回: {res}，等待结算按钮就绪...")
+                except Exception as ce:
+                    logger.warning(f"人机验证求解过程异常: {ce}")
+                await page.wait_for_timeout(2000)
+
+            # 3. 如果结算按钮已经在 iframe 或页面 DOM 中出现，立即返回（无需等待验证码）！
             try:
                 if await place_order_btn.is_visible():
                     logger.debug("✅ Found checkout button in purchase iframe")
@@ -287,21 +321,6 @@ class EpicGames:
                     return page, page_checkout_btn
             except Exception:
                 pass
-
-            # 3. 检查是否有真实可见的人机挑战弹窗（排除后台静默脚本）
-            try:
-                challenge_frame = page.locator(
-                    "iframe[title*='challenge'], iframe[src*='challenge'], iframe[data-hcaptcha-widget-id]"
-                ).first
-                if await challenge_frame.is_visible() and agent is not None:
-                    logger.info("⚡ 检测到屏幕弹出人机验证码，正在调用 Gemini AI 求解...")
-                    with suppress(Exception):
-                        await agent.robotic_arm.click_checkbox()
-                    await agent.wait_for_challenge()
-                    logger.success("✅ 人机验证求解完成，继续等待结算按钮就绪...")
-                    await page.wait_for_timeout(2000)
-            except Exception as ce:
-                logger.warning(f"人机验证求解过程异常: {ce}")
 
             # 4. 检查是否有需要勾选的条款 (如欧盟撤回权声明、隐私条款)
             try:
@@ -379,9 +398,10 @@ class EpicGames:
         await self._save_debug_screenshot(page, "fail_not_in_library")
         return False
 
-    async def _handle_instant_checkout(self, page: Page):
+    async def _handle_instant_checkout(self, page: Page, agent: AgentV = None):
         logger.info("Triggering Instant Checkout Flow...")
-        agent = AgentV(page=page, agent_config=settings)
+        if agent is None:
+            agent = AgentV(page=page, agent_config=settings)
 
         try:
             # 1. 查找结算容器与支付按钮（内含前置验证码自动求解）
@@ -397,21 +417,19 @@ class EpicGames:
             await payment_btn.click(force=True)
             await page.wait_for_timeout(2000)
 
-            # 2. 点击后检测是否触发了二阶段人机验证码
+            # 2. 点击后检测是否触发了二阶段人机验证码 (轮询最多 5 秒)
             try:
-                has_post_captcha = False
-                if any("hcaptcha.com" in f.url for f in page.frames):
-                    has_post_captcha = True
-                elif await page.locator("iframe[src*='hcaptcha.com'], iframe[title*='hCaptcha']").count() > 0:
-                    has_post_captcha = True
-
-                if has_post_captcha:
-                    logger.info("⚡ 点击结算后触发二阶段人机验证，正在调用 Gemini AI 求解...")
-                    await agent.wait_for_challenge()
-                else:
-                    # 快速轮询 3 秒看是否有验证码出现
-                    with suppress(Exception):
-                        await asyncio.wait_for(agent.wait_for_challenge(), timeout=3.0)
+                for _ in range(5):
+                    has_post_challenge = any(
+                        not f.is_detached() and "hcaptcha.com" in f.url and ("frame=challenge" in f.url or "frame=checkbox" in f.url)
+                        for f in page.frames
+                    )
+                    if has_post_challenge:
+                        logger.info("⚡ 点击结算后触发二阶段人机验证，正在调用 Gemini AI 求解...")
+                        with suppress(Exception):
+                            await agent.wait_for_challenge()
+                        break
+                    await page.wait_for_timeout(1000)
             except Exception as e:
                 logger.debug(f"Post-click CAPTCHA check: {e}")
 
@@ -580,6 +598,9 @@ class EpicGames:
 
             # 5. 盲点领取逻辑 (Get / Free / Purchase / Buy Now)
             logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
+
+            # 提前挂载 AgentV 监听 response，确保捕获点击触发的 /getcaptcha/ 网络请求
+            agent = AgentV(page=page, agent_config=settings)
             await _click_and_check_modal(purchase_btn)
 
             # 检测点击后是否被跳转到了登录页
@@ -597,6 +618,7 @@ class EpicGames:
                         with suppress(Exception):
                             await retry_btn.wait_for(state="visible", timeout=5000)
                             if await retry_btn.is_visible():
+                                agent = AgentV(page=page, agent_config=settings)
                                 await _click_and_check_modal(retry_btn)
                     except Exception:
                         pass
@@ -606,7 +628,7 @@ class EpicGames:
                     continue
 
             # 转入即时结账流程
-            success = await self._handle_instant_checkout(page)
+            success = await self._handle_instant_checkout(page, agent=agent)
             if not success:
                 logger.info(f"Retrying instant checkout for {url}...")
                 try:
@@ -618,8 +640,9 @@ class EpicGames:
                     with suppress(Exception):
                         await retry_btn.wait_for(state="visible", timeout=5000)
                         if await retry_btn.is_visible():
+                            retry_agent = AgentV(page=page, agent_config=settings)
                             await _click_and_check_modal(retry_btn)
-                            success = await self._handle_instant_checkout(page)
+                            success = await self._handle_instant_checkout(page, agent=retry_agent)
                 except Exception as e:
                     logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
                     success = False
