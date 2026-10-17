@@ -61,7 +61,8 @@ class EpicAuthorization:
             for action in list(btn_ids):
                 with suppress(Exception):
                     reminder_btn = self.page.locator(action)
-                    if await reminder_btn.is_visible(timeout=1000):
+                    await reminder_btn.wait_for(state="visible", timeout=1000)
+                    if await reminder_btn.is_visible():
                         await reminder_btn.click()
                         btn_ids.remove(action)
 

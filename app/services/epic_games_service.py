@@ -249,48 +249,61 @@ class EpicGames:
         wpc = page.frame_locator(iframe_selector).first
 
         logger.debug("Looking for purchase/checkout button or CAPTCHA...")
-        place_order_btn = wpc.locator("button").filter(has_text=re.compile(r"^(PLACE ORDER|Place Order|下订单)$", re.I)).first
+        # 按钮正则：覆盖 "Add to library", "PLACE ORDER", "添加到库", "下订单" 等
+        btn_regex = re.compile(r"^\s*(Add to library|Add to Library|添加到库|PLACE ORDER|Place Order|下订单)\s*$", re.I)
+
+        place_order_btn = wpc.locator("button").filter(has_text=btn_regex).first
         confirm_btn = wpc.locator("button[class*='payment-confirm__btn'], button[data-testid*='confirm-order']").first
-        add_to_library_btn = wpc.locator("button").filter(has_text=re.compile(r"^(Add to library|Add to Library|添加到库)$", re.I)).first
+        page_checkout_btn = page.locator("button").filter(has_text=btn_regex).first
 
         start_time = time.time()
         max_wait = 35.0
 
         while time.time() - start_time < max_wait:
-            # 1. 优先检测是否有人机验证码遮挡（若有，先调用 AI 模型求解）
-            has_captcha = False
+            # 1. 优先检查阻碍性弹窗 (如 Device not supported / 年龄提示) 并自动点击 Continue
             try:
-                if any("hcaptcha.com" in f.url for f in page.frames):
-                    has_captcha = True
-                elif await page.locator("iframe[src*='hcaptcha.com'], iframe[title*='hCaptcha']").count() > 0:
-                    has_captcha = True
+                continue_dialog_btn = page.locator(
+                    "div[role='dialog'] button, [aria-modal='true'] button, button"
+                ).filter(has_text=re.compile(r"^\s*(Continue|继续)\s*$", re.I)).first
+                with suppress(Exception):
+                    await continue_dialog_btn.wait_for(state="visible", timeout=1500)
+                if await continue_dialog_btn.is_visible():
+                    logger.warning("⚠️ 检测到阻挡弹窗 (Device not supported)，点击 Continue...")
+                    await continue_dialog_btn.click()
+                    await page.wait_for_timeout(1000)
             except Exception:
                 pass
 
-            if has_captcha and agent is not None:
-                logger.info("⚡ 检测到结算前弹出人机验证码，正在调用 Gemini AI 求解...")
-                try:
+            # 2. 核心：如果结算按钮已经在 iframe 或页面 DOM 中出现，立即返回（无需等待验证码）！
+            try:
+                if await place_order_btn.is_visible():
+                    logger.debug("✅ Found checkout button in purchase iframe")
+                    return wpc, place_order_btn
+                if await confirm_btn.is_visible():
+                    logger.debug("✅ Found confirm button via CSS in purchase iframe")
+                    return wpc, confirm_btn
+                if await page_checkout_btn.is_visible():
+                    logger.debug("✅ Found checkout button in top-level page DOM")
+                    return page, page_checkout_btn
+            except Exception:
+                pass
+
+            # 3. 检查是否有真实可见的人机挑战弹窗（排除后台静默脚本）
+            try:
+                challenge_frame = page.locator(
+                    "iframe[title*='challenge'], iframe[src*='challenge'], iframe[data-hcaptcha-widget-id]"
+                ).first
+                if await challenge_frame.is_visible() and agent is not None:
+                    logger.info("⚡ 检测到屏幕弹出人机验证码，正在调用 Gemini AI 求解...")
+                    with suppress(Exception):
+                        await agent.robotic_arm.click_checkbox()
                     await agent.wait_for_challenge()
                     logger.success("✅ 人机验证求解完成，继续等待结算按钮就绪...")
                     await page.wait_for_timeout(2000)
-                except Exception as ce:
-                    logger.warning(f"人机验证求解过程异常: {ce}")
+            except Exception as ce:
+                logger.warning(f"人机验证求解过程异常: {ce}")
 
-            # 2. 检查结算按钮是否已出现并可见
-            try:
-                if await place_order_btn.is_visible():
-                    logger.debug("✅ Found 'PLACE ORDER' button via text match")
-                    return wpc, place_order_btn
-                if await confirm_btn.is_visible():
-                    logger.debug("✅ Found button via CSS class match")
-                    return wpc, confirm_btn
-                if await add_to_library_btn.is_visible():
-                    logger.debug("✅ Found 'Add to library' button for free game checkout")
-                    return wpc, add_to_library_btn
-            except Exception:
-                pass
-
-            # 3. 检查是否有需要勾选的条款 (如欧盟撤回权声明、隐私条款)
+            # 4. 检查是否有需要勾选的条款 (如欧盟撤回权声明、隐私条款)
             try:
                 terms_checkbox = wpc.locator("input[type='checkbox']").first
                 if await terms_checkbox.is_visible():
@@ -301,8 +314,8 @@ class EpicGames:
 
             await page.wait_for_timeout(1000)
 
-        logger.warning("Primary buttons not found in iframe within timeout.")
-        raise AssertionError("Could not find Place Order or Add to Library button in iframe")
+        logger.warning("Primary buttons not found in iframe or page within timeout.")
+        raise AssertionError("Could not find Place Order or Add to Library button in iframe or page")
 
     @staticmethod
     async def _uk_confirm_order(wpc: FrameLocator):
@@ -320,7 +333,7 @@ class EpicGames:
         若未变化，尝试刷新页面再次校验。只有按钮确实为已拥有状态，才返回 True。
         """
         logger.debug("正在执行入库状态终检验...")
-        # 等待结算 iframe 关闭 (最多等 8 秒)
+        # 等待结算 iframe 或弹窗关闭 (最多等 8 秒)
         with suppress(Exception):
             iframe_locator = page.locator("//iframe[contains(@id, 'webPurchaseContainer') or contains(@src, 'purchase')]").first
             await iframe_locator.wait_for(state="hidden", timeout=8000)
@@ -338,7 +351,10 @@ class EpicGames:
                     )
                 ).first
 
-                if await cta_btn.is_visible(timeout=3000):
+                with suppress(Exception):
+                    await cta_btn.wait_for(state="visible", timeout=3000)
+
+                if await cta_btn.is_visible():
                     btn_text = (await cta_btn.text_content() or "").strip()
                     btn_text_upper = btn_text.upper()
                     if any(kw in btn_text_upper for kw in ["IN LIBRARY", "OWNED", "已在库中", "已拥有"]):
@@ -448,7 +464,8 @@ class EpicGames:
                     "#onetrust-accept-btn-handler, button:has-text('Accept All Cookies'), button:has-text('全部接受')"
                 ).first
                 with suppress(Exception):
-                    if await cookie_btn.is_visible(timeout=2000):
+                    await cookie_btn.wait_for(state="visible", timeout=2000)
+                    if await cookie_btn.is_visible():
                         await cookie_btn.click()
             except Exception:
                 pass
@@ -457,7 +474,8 @@ class EpicGames:
             try:
                 continue_btn = page.locator("//button//span[text()='Continue'] | button:has-text('Continue')").first
                 with suppress(Exception):
-                    if await continue_btn.is_visible(timeout=3000):
+                    await continue_btn.wait_for(state="visible", timeout=3000)
+                    if await continue_btn.is_visible():
                         await continue_btn.click()
             except Exception:
                 pass
@@ -534,23 +552,24 @@ class EpicGames:
                 skipped_urls.add(url)
                 continue
 
-            # 内部辅助函数：点击并检测拦截弹窗
+            # 内部辅助函数：点击并检测拦截弹窗 (如 Device not supported)
             async def _click_and_check_modal(target):
                 await target.click()
                 await page.wait_for_timeout(1000)
                 try:
                     continue_dialog_btn = (
-                        page.locator("div[role='dialog'] button, [aria-modal='true'] button")
-                        .filter(has_text=re.compile(r"(Continue|继续)", re.I))
+                        page.locator("div[role='dialog'] button, [aria-modal='true'] button, button")
+                        .filter(has_text=re.compile(r"^\s*(Continue|继续)\s*$", re.I))
                         .first
                     )
                     with suppress(Exception):
-                        if await continue_dialog_btn.is_visible(timeout=3000):
+                        await continue_dialog_btn.wait_for(state="visible", timeout=3000)
+                        if await continue_dialog_btn.is_visible():
                             logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
                             await continue_dialog_btn.click()
                             await page.wait_for_timeout(1000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Modal check error: {e}")
 
             # 4. 白名单检查 (Add to Cart 特殊处理)
             if "CART" in btn_text_upper:
@@ -575,8 +594,10 @@ class EpicGames:
                         retry_btn = page.locator("button, a[role='button']").filter(
                             has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
                         ).first
-                        if await retry_btn.is_visible(timeout=5000):
-                            await _click_and_check_modal(retry_btn)
+                        with suppress(Exception):
+                            await retry_btn.wait_for(state="visible", timeout=5000)
+                            if await retry_btn.is_visible():
+                                await _click_and_check_modal(retry_btn)
                     except Exception:
                         pass
                 else:
@@ -594,9 +615,11 @@ class EpicGames:
                     retry_btn = page.locator("button, a[role='button']").filter(
                         has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
                     ).first
-                    if await retry_btn.is_visible(timeout=5000):
-                        await _click_and_check_modal(retry_btn)
-                        success = await self._handle_instant_checkout(page)
+                    with suppress(Exception):
+                        await retry_btn.wait_for(state="visible", timeout=5000)
+                        if await retry_btn.is_visible():
+                            await _click_and_check_modal(retry_btn)
+                            success = await self._handle_instant_checkout(page)
                 except Exception as e:
                     logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
                     success = False
