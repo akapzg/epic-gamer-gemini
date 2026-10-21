@@ -95,7 +95,11 @@ async def execute_browser_tasks(headless: bool = True, random_delay: bool = Fals
         # Handle Epic Games authentication
         logger.debug("Initiating Epic Games authentication")
         auth_agent = EpicAuthorization(page)
-        await auth_agent.invoke()
+        auth_status = await auth_agent.invoke()
+        if not auth_status:
+            logger.warning("⚠️ Epic Games 初始鉴权未通过，后续领取时将尝试就地重新登录")
+        else:
+            logger.success("✅ Epic Games 账号鉴权成功")
         logger.debug("Authentication completed")
 
         # Execute a free games collection on the SAME page (单标签页贯穿始终，避免跨标签导致会话丢失)
