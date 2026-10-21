@@ -84,7 +84,9 @@ class EpicAuthorization:
                 await self.page.wait_for_timeout(2000)
 
             # 2. 等待登录页关键交互元素之一渲染就绪（最多等待 15 秒）
-            username = settings.EPIC_EMAIL.split("@")[0].strip()
+            email_prefix = settings.EPIC_EMAIL.split("@")[0].strip()
+            email_domain = settings.EPIC_EMAIL.split("@")[-1].strip()
+
             for _ in range(30):
                 if "/id/login" not in self.page.url:
                     break
@@ -92,20 +94,20 @@ class EpicAuthorization:
                     break
                 if await self.page.locator("#email").is_visible():
                     break
-                welcome_loc = self.page.locator("text=Welcome back, text=欢迎回来").first
+                welcome_loc = self.page.get_by_text(re.compile(r"Welcome back|欢迎回来", re.I)).first
                 if await welcome_loc.is_visible():
                     break
-                use_another_btn = self.page.locator("button, a, div[role='button']").filter(
-                    has_text=re.compile(r"Use another account|使用其他(账号|账户|帐户)", re.I)
+                use_another_btn = self.page.get_by_text(
+                    re.compile(r"Use another account|使用其他(账号|账户|帐户)", re.I)
                 ).first
                 if await use_another_btn.is_visible():
                     break
                 await self.page.wait_for_timeout(500)
 
             # 3. 检测是否处于 "Welcome back" (已记住账号选择) 界面
-            welcome_loc = self.page.locator("text=Welcome back, text=欢迎回来").first
-            use_another_btn = self.page.locator("button, a, div[role='button'], [tabindex='0']").filter(
-                has_text=re.compile(r"Use another account|使用其他(账号|账户|帐户)", re.I)
+            welcome_loc = self.page.get_by_text(re.compile(r"Welcome back|欢迎回来", re.I)).first
+            use_another_btn = self.page.get_by_text(
+                re.compile(r"Use another account|使用其他(账号|账户|帐户)", re.I)
             ).first
 
             is_welcome_back = False
@@ -116,8 +118,11 @@ class EpicAuthorization:
                 logger.info("检测到 Epic 'Welcome back' (记住账号切换) 界面...")
 
                 # 寻找匹配当前用户名或邮箱域名的账号卡片
-                account_card = self.page.locator("button, div[role='button'], a, li, [tabindex='0']").filter(
-                    has_text=re.compile(re.escape(username), re.I)
+                account_pattern = re.compile(
+                    rf"{re.escape(email_prefix)}|@{re.escape(email_domain)}", re.I
+                )
+                account_card = self.page.locator("button, div[role='button'], a, li, [tabindex='0'], div").filter(
+                    has_text=account_pattern
                 ).first
 
                 card_found = False
@@ -126,20 +131,26 @@ class EpicAuthorization:
 
                 if not card_found:
                     with suppress(Exception):
-                        account_card = self.page.get_by_text(username, exact=False).first
+                        account_card = self.page.get_by_text(account_pattern).first
                         card_found = await account_card.is_visible()
 
                 if card_found:
-                    logger.info(f"👉 发现匹配账号卡片 '{username}'，点击快速登录...")
+                    logger.info(f"👉 发现匹配账号卡片 ({email_prefix})，点击快速登录...")
                     with suppress(Exception):
                         await account_card.click()
-                    await self.page.wait_for_timeout(2000)
 
-                    # 检查是否可能出现验证码
-                    with suppress(Exception):
-                        await agent.wait_for_challenge()
+                    # 动态轮询等待点击后的响应（最多 8 秒）：成功跳转、出现密码框、或触发人机验证
+                    start_click_wait = time.time()
+                    while time.time() - start_click_wait < 8:
+                        if "/id/login" not in self.page.url:
+                            break
+                        if await self.page.locator("#password").is_visible():
+                            break
+                        with suppress(Exception):
+                            await asyncio.wait_for(agent.wait_for_challenge(), timeout=1.0)
+                        await self.page.wait_for_timeout(500)
 
-                    # 检查是否点击后直接完成会话恢复并跳转
+                    # 检查是否点击后直接完成会话恢复并跳转离开登录页
                     if "/id/login" not in self.page.url:
                         logger.success("✅ 点击记住账号后直接完成登录/会话刷新！")
                         with suppress(Exception):
@@ -156,12 +167,6 @@ class EpicAuthorization:
                     with suppress(Exception):
                         if await use_another_btn.is_visible():
                             await use_another_btn.click()
-                        else:
-                            fallback_btn = self.page.get_by_text(
-                                re.compile(r"Use another account|使用其他(账号|账户|帐户)", re.I)
-                            ).first
-                            if await fallback_btn.is_visible():
-                                await fallback_btn.click()
                         await self.page.wait_for_timeout(1000)
 
             # 4. 判断是否需要输入邮箱，或者已经直接处于密码输入阶段
@@ -175,40 +180,36 @@ class EpicAuthorization:
                 logger.info(f"输入登录邮箱: {settings.EPIC_EMAIL}")
                 email_input = self.page.locator("#email").first
                 await email_input.wait_for(state="visible", timeout=15000)
-                await email_input.clear()
-                await email_input.type(settings.EPIC_EMAIL)
+                await email_input.fill(settings.EPIC_EMAIL)
 
                 # 点击继续按钮
                 continue_btn = self.page.locator("#continue, button[type='submit']").first
                 await continue_btn.click()
 
-                # 关键：点击继续后，Epic 可能会立即弹出人机验证（验证码出现在输入密码之前）！
-                try:
-                    logger.debug("Checking for CAPTCHA after email submit...")
-                    await agent.wait_for_challenge()
-                except Exception as e:
-                    logger.debug(f"No CAPTCHA after email submit (or skipped): {e}")
+                # 点击继续后，轮询等待密码输入框出现或人机验证码弹出（避免盲等 30 秒超时）
+                logger.debug("等待密码输入框或人机验证...")
+                start_email_wait = time.time()
+                while time.time() - start_email_wait < 20:
+                    if await self.page.locator("#password").is_visible():
+                        logger.debug("密码输入框已就绪，无需人机验证")
+                        break
+                    with suppress(Exception):
+                        await asyncio.wait_for(agent.wait_for_challenge(), timeout=2.0)
+                    await self.page.wait_for_timeout(500)
 
             # 5. 输入密码
             logger.info("输入账号密码...")
             password_input = self.page.locator("#password")
             await password_input.wait_for(state="visible", timeout=20000)
-            await password_input.clear()
-            await password_input.type(settings.EPIC_PASSWORD.get_secret_value())
+            await password_input.fill(settings.EPIC_PASSWORD.get_secret_value())
 
             # 6. 点击登录提交按钮，触发人机挑战值守监听器
             sign_in_btn = self.page.locator("#sign-in, button[type='submit']").first
             await sign_in_btn.wait_for(state="visible", timeout=15000)
             await sign_in_btn.click()
 
-            # 7. 点击登录后，可能再次触发人机挑战
-            try:
-                logger.debug("Checking for CAPTCHA after sign-in...")
-                await agent.wait_for_challenge()
-            except Exception as e:
-                logger.debug(f"No CAPTCHA after sign-in (or skipped): {e}")
-
-            # 8. 等待登录成功信号或页面离开登录页
+            # 7. 等待登录成功信号、URL 跳转或人机验证（避免盲等 30 秒超时）
+            logger.debug("等待登录跳转或人机验证...")
             start_wait = time.time()
             while time.time() - start_wait < 35:
                 if not self._is_login_success_signal.empty():
@@ -217,7 +218,9 @@ class EpicAuthorization:
                 if "/id/login" not in self.page.url:
                     logger.debug(f"Redirected away from login page to {self.page.url}, inferring login success.")
                     break
-                await self.page.wait_for_timeout(1000)
+                with suppress(Exception):
+                    await asyncio.wait_for(agent.wait_for_challenge(), timeout=2.0)
+                await self.page.wait_for_timeout(500)
             else:
                 if "/id/login" in self.page.url:
                     raise TimeoutError("Login timed out and still on /id/login")
