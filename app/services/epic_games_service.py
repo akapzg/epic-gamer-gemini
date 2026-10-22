@@ -654,6 +654,20 @@ class EpicGames:
                     logger.success("登录成功，重新加载游戏页面并再次尝试领取...")
                     await page.goto(url, wait_until="load")
                     await page.wait_for_timeout(2000)
+
+                    # 关键防御：重新登录后首先检查该游戏是否其实早已在库中！
+                    try:
+                        in_lib_btn = page.locator("button, a[role='button']").filter(
+                            has_text=re.compile(r"^\s*(In Library|已在库中|已在游戏库中)\s*$", re.I)
+                        ).first
+                        with suppress(Exception):
+                            if await in_lib_btn.is_visible():
+                                logger.success(f"🎉 登录后状态恢复：游戏实测已在库中 (In Library)，跳过领取，避免重复下单误报: {url}")
+                                skipped_urls.add(url)
+                                continue
+                    except Exception:
+                        pass
+
                     try:
                         retry_btn = page.locator("button, a[role='button']").filter(
                             has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
@@ -663,6 +677,11 @@ class EpicGames:
                             if await retry_btn.is_visible():
                                 agent = AgentV(page=page, agent_config=settings)
                                 await _click_and_check_modal(retry_btn)
+                            else:
+                                if await self._verify_library_status(page):
+                                    logger.info(f"ℹ️ 游戏已在库中，跳过后续结账: {url}")
+                                    skipped_urls.add(url)
+                                    continue
                     except Exception:
                         pass
                 else:

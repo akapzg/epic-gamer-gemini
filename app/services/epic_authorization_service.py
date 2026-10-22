@@ -58,11 +58,20 @@ class EpicAuthorization:
 
         btn_ids = ["#link-success", "#login-reminder-prompt-setup-tfa-skip", "#yes"]
 
-        # 账号长期不登录可能需要跳过提示
+        # 账号长期不登录可能需要跳过提示或处理 2FA 弹窗
         for _ in range(10):
             if not self._is_refresh_csrf_signal.empty() or not btn_ids:
                 break
             await self.page.wait_for_timeout(500)
+
+            # 额外检查并关闭 "Protect Your Account" 弹窗
+            with suppress(Exception):
+                maybe_later = self.page.locator("button, a").filter(
+                    has_text=re.compile(r"Maybe later|以后再说|稍后", re.I)
+                ).first
+                if await maybe_later.is_visible():
+                    await maybe_later.click()
+
             for action in list(btn_ids):
                 with suppress(Exception):
                     reminder_btn = self.page.locator(action)
@@ -121,7 +130,8 @@ class EpicAuthorization:
                 account_pattern = re.compile(
                     rf"{re.escape(email_prefix)}|@{re.escape(email_domain)}", re.I
                 )
-                account_card = self.page.locator("button, div[role='button'], a, li, [tabindex='0'], div").filter(
+                # 仅匹配交互容器（button, a, li, role='button'），绝对不包含宽泛的 div，防止点中外层大容器点空
+                account_card = self.page.locator("button, [role='button'], a, li, [tabindex='0']").filter(
                     has_text=account_pattern
                 ).first
 
@@ -130,12 +140,13 @@ class EpicAuthorization:
                     card_found = await account_card.is_visible()
 
                 if not card_found:
+                    # 直接定位包含用户名或邮箱的文字节点，点击文字会自动冒泡触发整个卡片的点击事件
                     with suppress(Exception):
                         account_card = self.page.get_by_text(account_pattern).first
                         card_found = await account_card.is_visible()
 
                 if card_found:
-                    logger.info(f"👉 发现匹配账号卡片 ({email_prefix})，点击快速登录...")
+                    logger.info(f"👉 发现匹配账号卡片 ({email_prefix})，精准点击快速登录...")
                     with suppress(Exception):
                         await account_card.click()
 
@@ -208,10 +219,20 @@ class EpicAuthorization:
             await sign_in_btn.wait_for(state="visible", timeout=15000)
             await sign_in_btn.click()
 
-            # 7. 等待登录成功信号、URL 跳转或人机验证（避免盲等 30 秒超时）
-            logger.debug("等待登录跳转或人机验证...")
+            # 7. 等待登录成功信号、URL 跳转、人机验证或 2FA 提示弹窗（避免盲等 30 秒超时）
+            logger.debug("等待登录跳转、人机验证或 2FA 提示...")
             start_wait = time.time()
             while time.time() - start_wait < 35:
+                # 检查并自动跳过 "Protect Your Account" (2FA 提示) 弹窗
+                maybe_later_btn = self.page.locator("button, a").filter(
+                    has_text=re.compile(r"Maybe later|以后再说|稍后", re.I)
+                ).first
+                with suppress(Exception):
+                    if await maybe_later_btn.is_visible():
+                        logger.info("👉 检测到 'Protect Your Account' (2FA 提示) 弹窗，点击 'Maybe later' 跳过...")
+                        await maybe_later_btn.click()
+                        await self.page.wait_for_timeout(1000)
+
                 if not self._is_login_success_signal.empty():
                     logger.debug("Received login success signal.")
                     break
@@ -240,18 +261,42 @@ class EpicAuthorization:
             return None
 
     async def invoke(self):
-        logger.debug("正在验证 Epic Games 账号会话真实有效性...")
+        logger.debug("正在严格验证 Epic Games 账号会话真实有效性...")
         for attempt in range(3):
-            # 访问受鉴权保护的个人中心检验会话真实有效性；若会话过期，Epic 会立即 302 重定向到 /id/login
+            # 访问受鉴权保护的个人中心检验会话真实有效性；若会话过期，Epic 会在 1-4 秒内 302/客户端重定向到 /id/login
             try:
                 await self.page.goto("https://www.epicgames.com/account/personal", wait_until="domcontentloaded")
-                await self.page.wait_for_timeout(2000)
             except Exception as e:
                 logger.warning(f"导航至个人中心重试 ({attempt + 1}/3): {e}")
 
-            # 若被重定向到 /id/login，说明会话已过期，执行登录
-            if "/id/login" in self.page.url:
-                logger.info("检测到账号会话已失效 (被重定向至登录页)，启动登录流程...")
+            # 给予页面最多 6 秒的 SPA 重定向缓冲，同时持续检测是否真实呈现已登录用户数据
+            is_valid_session = False
+            for _ in range(12):
+                if "/id/login" in self.page.url:
+                    break
+                # 检测个人中心页面是否渲染出了个人信息（账号ID/邮箱/显示名称）
+                with suppress(Exception):
+                    email_field = self.page.locator("input[name='email'], input[name='displayName'], [data-component='AccountSettings']").first
+                    if await email_field.is_visible():
+                        is_valid_session = True
+                        break
+                    # 或者检测页面中是否出现了登录邮箱文本
+                    if await self.page.get_by_text(settings.EPIC_EMAIL, exact=False).first.is_visible():
+                        is_valid_session = True
+                        break
+                # 检测导航条登录状态
+                with suppress(Exception):
+                    nav = self.page.locator("//egs-navigation").first
+                    status = await nav.get_attribute("isloggedin")
+                    display_name = await nav.get_attribute("displayname")
+                    if status == "true" and display_name and display_name.lower() != "null":
+                        is_valid_session = True
+                        break
+                await self.page.wait_for_timeout(500)
+
+            # 若被重定向到 /id/login 或未检测到任何可信的已登录用户身份，说明会话已失效，执行登录
+            if "/id/login" in self.page.url or not is_valid_session:
+                logger.info("检测到账号会话已失效 (未认证或被重定向至登录页)，启动登录流程...")
                 if await self._login():
                     logger.success("登录成功，会话已恢复有效")
                     return True
