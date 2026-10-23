@@ -75,3 +75,4 @@ tests/
 .devcontainer/
 tmp/
 app/tmp/
+AGENTS.md
