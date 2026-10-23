@@ -500,6 +500,97 @@ class EpicGames:
         # 4. 终极入库实锤校验：核查详情页主按钮是否已变为 "In Library"
         return await self._verify_library_status(page)
 
+    async def _handle_age_gate_and_takeover(self, page: Page, url: str) -> None:
+        """
+        处理 18+ 成人分级游戏的年龄门禁遮罩 (Takeover / Age Gate)：
+        1. 若弹出 'Sign in to confirm your age' (未登录或需强化鉴权)，点击 Sign In 触发登录恢复会话；
+        2. 若弹出常规年龄警告 ('Continue' / '继续' / 'View Product')，点击确认关闭遮罩。
+        """
+        # 1. 检测是否存在 'Sign in to confirm your age' 登录确认年龄遮罩
+        try:
+            age_signin_btn = (
+                page.locator("[class*='_takeover_'] button, [class*='_takeover_'] a, div[data-rac] button, div[data-rac] a")
+                .filter(has_text=re.compile(r"^\s*(Sign In|Sign in|登录)\s*$", re.I))
+                .first
+            )
+            age_prompt_text = page.get_by_text("Sign in to confirm your age", exact=False).first
+
+            has_age_signin = False
+            with suppress(Exception):
+                await age_signin_btn.wait_for(state="visible", timeout=3500)
+                if await age_signin_btn.is_visible():
+                    has_age_signin = True
+            if not has_age_signin:
+                with suppress(Exception):
+                    if await age_prompt_text.is_visible():
+                        age_signin_btn = (
+                            page.locator("button, a[role='button'], a")
+                            .filter(has_text=re.compile(r"^\s*(Sign In|Sign in|登录)\s*$", re.I))
+                            .first
+                        )
+                        if await age_signin_btn.is_visible():
+                            has_age_signin = True
+
+            if has_age_signin:
+                logger.warning(f"⚠️ 检测到 18+ 年龄验证登录遮罩 ('Sign in to confirm your age')，点击 Sign In 恢复登录态... ({url})")
+                await self._save_debug_screenshot(page, "age_gate_signin_prompt")
+                await age_signin_btn.click()
+                await page.wait_for_timeout(2000)
+
+                # 等待可能的重定向（最多 6 秒），若进入 /id/login 则执行登录
+                for _ in range(12):
+                    if "/id/login" in page.url:
+                        auth = EpicAuthorization(page)
+                        if await auth._login():
+                            logger.success("✅ 18+ 年龄门禁登录成功，准备返回商品页...")
+                        else:
+                            logger.error(f"❌ 18+ 年龄门禁登录失败: {url}")
+                        break
+                    await page.wait_for_timeout(500)
+
+                # 确保回到目标游戏详情页（使用 startswith 防止 redirectUrl 参数包含 url 造成误判）
+                if not page.url.startswith(url):
+                    await page.goto(url, wait_until="load")
+                await page.wait_for_timeout(2500)
+
+                # 兜底校验：若 SSO 自动跳回后依然显示 'Sign in to confirm your age'，强制刷新会话重新登录
+                still_blocked = False
+                with suppress(Exception):
+                    if await age_prompt_text.is_visible():
+                        still_blocked = True
+                if still_blocked:
+                    logger.warning("⚠️ SSO 自动跳转后仍存在年龄登录拦截，强制重置会话并重新登录...")
+                    auth = EpicAuthorization(page)
+                    if await auth._login():
+                        await page.goto(url, wait_until="load")
+                        await page.wait_for_timeout(2500)
+        except Exception as e:
+            logger.debug(f"Age gate sign-in check error: {e}")
+
+        # 2. 检测常规年龄限制遮罩（如已登录状态下的 Continue / 继续 / View Game）
+        try:
+            continue_btn = (
+                page.locator(
+                    "[class*='_takeover_'] button, div[data-rac] button, [role='dialog'] button, "
+                    "//button//span[text()='Continue'], button"
+                )
+                .filter(
+                    has_text=re.compile(
+                        r"^\s*(Continue|继续|View Product|View Game|查看产品|查看游戏|Access Content)\s*$",
+                        re.I,
+                    )
+                )
+                .first
+            )
+            with suppress(Exception):
+                await continue_btn.wait_for(state="visible", timeout=2500)
+                if await continue_btn.is_visible():
+                    logger.info("🔞 检测到年龄/内容分级提示遮罩，点击 Continue 放行...")
+                    await continue_btn.click()
+                    await page.wait_for_timeout(1000)
+        except Exception:
+            pass
+
     async def add_promotion_to_cart(self, page: Page, urls: List[str]) -> tuple[bool, set]:
         """返回 (has_pending_cart_items, skipped_urls)。
         skipped_urls 是确认已在库中或无效、本次被跳过的 URL 集合。
@@ -508,210 +599,219 @@ class EpicGames:
         skipped_urls: set = set()
 
         for url in urls:
-            await page.goto(url, wait_until="load")
-            await page.wait_for_timeout(2000)
-
-            # 404 检测
-            title = await page.title()
-            if "404" in title or "Page Not Found" in title:
-                logger.error(f"❌ Invalid URL (404 Page): {url}")
-                await self._save_debug_screenshot(page, "skip_404")
-                skipped_urls.add(url)
-                continue
-
-            # 处理 Cookie 弹窗（若存在则关闭，防止阻挡点击）
             try:
-                cookie_btn = page.locator(
-                    "#onetrust-accept-btn-handler, button:has-text('Accept All Cookies'), button:has-text('全部接受')"
-                ).first
-                with suppress(Exception):
-                    await cookie_btn.wait_for(state="visible", timeout=2000)
-                    if await cookie_btn.is_visible():
-                        await cookie_btn.click()
-            except Exception:
-                pass
+                await page.goto(url, wait_until="load")
+                await page.wait_for_timeout(2000)
 
-            # 处理年龄限制弹窗
-            try:
-                continue_btn = page.locator("//button//span[text()='Continue'] | button:has-text('Continue')").first
-                with suppress(Exception):
-                    await continue_btn.wait_for(state="visible", timeout=3000)
-                    if await continue_btn.is_visible():
-                        await continue_btn.click()
-            except Exception:
-                pass
+                # 404 检测
+                title = await page.title()
+                if "404" in title or "Page Not Found" in title:
+                    logger.error(f"❌ Invalid URL (404 Page): {url}")
+                    await self._save_debug_screenshot(page, "skip_404")
+                    skipped_urls.add(url)
+                    continue
 
-            # 1. 尝试找到主按钮或库中状态
-            # 综合定位器：优先 data-testid，再放宽至包含 Get / In Library 等关键词的按钮
-            purchase_btn = (
-                page.locator("button[data-testid='purchase-cta-button']")
-                .or_(page.locator("[data-testid='purchase-cta-button'] button"))
-                .or_(page.locator("[data-testid='purchase-cta-button']"))
-                .or_(
-                    page.locator("button, a[role='button']").filter(
-                        has_text=re.compile(
-                            r"^\s*(Get|GET|获取|In Library|IN LIBRARY|Owned|OWNED|已在库中|已拥有)\s*$",
-                            re.I,
+                # 处理 Cookie 弹窗（若存在则关闭，防止阻挡点击）
+                try:
+                    cookie_btn = page.locator(
+                        "#onetrust-accept-btn-handler, button:has-text('Accept All Cookies'), button:has-text('全部接受')"
+                    ).first
+                    with suppress(Exception):
+                        await cookie_btn.wait_for(state="visible", timeout=2000)
+                        if await cookie_btn.is_visible():
+                            await cookie_btn.click()
+                except Exception:
+                    pass
+
+                # 处理 18+ 年龄限制弹窗（含 'Sign in to confirm your age' 及常规 'Continue' 遮罩）
+                await self._handle_age_gate_and_takeover(page, url)
+
+                # 1. 尝试找到主按钮或库中状态
+                # 综合定位器：优先 data-testid，再放宽至包含 Get / In Library 等关键词的按钮
+                purchase_btn = (
+                    page.locator("button[data-testid='purchase-cta-button']")
+                    .or_(page.locator("[data-testid='purchase-cta-button'] button"))
+                    .or_(page.locator("[data-testid='purchase-cta-button']"))
+                    .or_(
+                        page.locator("button, a[role='button']").filter(
+                            has_text=re.compile(
+                                r"^\s*(Get|GET|获取|In Library|IN LIBRARY|Owned|OWNED|已在库中|已拥有)\s*$",
+                                re.I,
+                            )
                         )
                     )
+                    .first
                 )
-                .first
-            )
 
-            try:
-                with suppress(Exception):
-                    await purchase_btn.wait_for(state="visible", timeout=12000)
-                if not await purchase_btn.is_visible():
-                    # 备选检查 1：购买卡片或侧边栏是否明确标注已拥有
-                    library_badge = page.locator(
-                        "aside, [data-component='PurchaseCard'], [data-testid='purchase-cta-button']"
-                    ).filter(has_text=re.compile(r"(In Library|Owned|已在库中|已拥有)", re.I)).first
-                    if await library_badge.count() > 0 and await library_badge.is_visible():
-                        logger.success(f"Already in the library (Purchase Area Scan) - {url=}")
-                        skipped_urls.add(url)
-                        continue
-
-                    # 备选检查 2：任意可见的 Get / 获取 按钮
-                    alt_btn = page.locator("button, a[role='button']").filter(
-                        has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
-                    ).first
-                    if await alt_btn.is_visible():
-                        purchase_btn = alt_btn
-                    else:
-                        logger.warning(f"Could not find any purchase button - {url=}")
-                        await self._save_debug_screenshot(page, "skip_no_button")
-                        skipped_urls.add(url)
-                        continue
-            except Exception as e:
-                logger.warning(f"Error during purchase button detection: {e}")
-                skipped_urls.add(url)
-                continue
-
-            # 2. 获取按钮文字
-            btn_text = await purchase_btn.text_content()
-            if not btn_text:
-                btn_text = ""
-            btn_text_upper = btn_text.strip().upper()
-
-            logger.debug(f"👉 Found Button: '{btn_text}'")
-
-            # 3. 黑名单检查：只有这些情况绝对不能点
-            if any(
-                s in btn_text_upper
-                for s in [
-                    "IN LIBRARY",
-                    "OWNED",
-                    "UNAVAILABLE",
-                    "COMING SOON",
-                    "REQUIRES BASE GAME",
-                    "BASE GAME",
-                    "已在库中",
-                    "已拥有",
-                ]
-            ):
-                logger.success(f"Game status is '{btn_text}' - Skipping. - {url=}")
-                skipped_urls.add(url)
-                continue
-
-            # 内部辅助函数：点击并检测拦截弹窗 (如 Device not supported)
-            async def _click_and_check_modal(target):
-                await target.click()
-                await page.wait_for_timeout(1000)
                 try:
-                    continue_dialog_btn = (
-                        page.locator("div[role='dialog'] button, [aria-modal='true'] button, button")
-                        .filter(has_text=re.compile(r"^\s*(Continue|继续)\s*$", re.I))
-                        .first
-                    )
                     with suppress(Exception):
-                        await continue_dialog_btn.wait_for(state="visible", timeout=3000)
-                        if await continue_dialog_btn.is_visible():
-                            logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
-                            await continue_dialog_btn.click()
-                            await page.wait_for_timeout(1000)
-                except Exception as e:
-                    logger.debug(f"Modal check error: {e}")
+                        await purchase_btn.wait_for(state="visible", timeout=12000)
+                    if not await purchase_btn.is_visible():
+                        # 备选检查 1：购买卡片或侧边栏是否明确标注已拥有
+                        library_badge = page.locator(
+                            "aside, [data-component='PurchaseCard'], [data-testid='purchase-cta-button']"
+                        ).filter(has_text=re.compile(r"(In Library|Owned|已在库中|已拥有)", re.I)).first
+                        if await library_badge.count() > 0 and await library_badge.is_visible():
+                            logger.success(f"Already in the library (Purchase Area Scan) - {url=}")
+                            skipped_urls.add(url)
+                            continue
 
-            # 4. 白名单检查 (Add to Cart 特殊处理)
-            if "CART" in btn_text_upper:
-                logger.debug(f"🛒 Logic: Add To Cart - {url=}")
-                await _click_and_check_modal(purchase_btn)
-                has_pending_cart_items = True
-                continue
-
-            # 5. 盲点领取逻辑 (Get / Free / Purchase / Buy Now)
-            logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
-
-            # 提前挂载 AgentV 监听 response，确保捕获点击触发的 /getcaptcha/ 网络请求
-            agent = AgentV(page=page, agent_config=settings)
-            await _click_and_check_modal(purchase_btn)
-
-            # 检测点击后是否被跳转到了登录页
-            if "/id/login" in page.url:
-                logger.warning(f"⚠️ 点击购买后被重定向到登录页面，尝试就地重新登录... ({url})")
-                auth = EpicAuthorization(page)
-                if await auth._login():
-                    logger.success("登录成功，重新加载游戏页面并再次尝试领取...")
-                    await page.goto(url, wait_until="load")
-                    await page.wait_for_timeout(2000)
-
-                    # 关键防御：重新登录后首先检查该游戏是否其实早已在库中！
-                    try:
-                        in_lib_btn = page.locator("button, a[role='button']").filter(
-                            has_text=re.compile(r"^\s*(In Library|已在库中|已在游戏库中)\s*$", re.I)
+                        # 备选检查 2：任意可见的 Get / 获取 按钮
+                        alt_btn = page.locator("button, a[role='button']").filter(
+                            has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
                         ).first
-                        with suppress(Exception):
-                            if await in_lib_btn.is_visible():
-                                logger.success(f"🎉 登录后状态恢复：游戏实测已在库中 (In Library)，跳过领取，避免重复下单误报: {url}")
-                                skipped_urls.add(url)
-                                continue
-                    except Exception:
-                        pass
+                        if await alt_btn.is_visible():
+                            purchase_btn = alt_btn
+                        else:
+                            logger.warning(f"Could not find any purchase button - {url=}")
+                            await self._save_debug_screenshot(page, "skip_no_button")
+                            skipped_urls.add(url)
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error during purchase button detection: {e}")
+                    skipped_urls.add(url)
+                    continue
 
+                # 2. 获取按钮文字
+                btn_text = await purchase_btn.text_content()
+                if not btn_text:
+                    btn_text = ""
+                btn_text_upper = btn_text.strip().upper()
+
+                logger.debug(f"👉 Found Button: '{btn_text}'")
+
+                # 3. 黑名单检查：只有这些情况绝对不能点
+                if any(
+                    s in btn_text_upper
+                    for s in [
+                        "IN LIBRARY",
+                        "OWNED",
+                        "UNAVAILABLE",
+                        "COMING SOON",
+                        "REQUIRES BASE GAME",
+                        "BASE GAME",
+                        "已在库中",
+                        "已拥有",
+                    ]
+                ):
+                    logger.success(f"Game status is '{btn_text}' - Skipping. - {url=}")
+                    skipped_urls.add(url)
+                    continue
+
+                # 内部辅助函数：点击前清理遮罩、带超时与 force 兜底点击，并检测后续拦截弹窗 (如 Device not supported)
+                async def _click_and_check_modal(target):
+                    # 点击前若仍有延迟渲染的年龄遮罩则先清理
+                    await self._handle_age_gate_and_takeover(page, url)
                     try:
+                        await target.click(timeout=10000)
+                    except TimeoutError:
+                        logger.warning("⚠️ 常规点击被遮罩层拦截超时，尝试清理遮罩后执行穿透点击 (force=True)...")
+                        await self._handle_age_gate_and_takeover(page, url)
+                        await target.click(force=True, timeout=5000)
+
+                    await page.wait_for_timeout(1000)
+                    try:
+                        continue_dialog_btn = (
+                            page.locator("div[role='dialog'] button, [aria-modal='true'] button, button")
+                            .filter(has_text=re.compile(r"^\s*(Continue|继续)\s*$", re.I))
+                            .first
+                        )
+                        with suppress(Exception):
+                            await continue_dialog_btn.wait_for(state="visible", timeout=3000)
+                            if await continue_dialog_btn.is_visible():
+                                logger.warning("⚠️ Detected modal (e.g., 'Device not supported'), clicking Continue.")
+                                await continue_dialog_btn.click()
+                                await page.wait_for_timeout(1000)
+                    except Exception as e:
+                        logger.debug(f"Modal check error: {e}")
+
+                # 4. 白名单检查 (Add to Cart 特殊处理)
+                if "CART" in btn_text_upper:
+                    logger.debug(f"🛒 Logic: Add To Cart - {url=}")
+                    await _click_and_check_modal(purchase_btn)
+                    has_pending_cart_items = True
+                    continue
+
+                # 5. 盲点领取逻辑 (Get / Free / Purchase / Buy Now)
+                logger.debug(f"⚡️ Logic: Aggressive Click (Text: {btn_text}) - {url=}")
+
+                # 提前挂载 AgentV 监听 response，确保捕获点击触发的 /getcaptcha/ 网络请求
+                agent = AgentV(page=page, agent_config=settings)
+                await _click_and_check_modal(purchase_btn)
+
+                # 检测点击后是否被跳转到了登录页
+                if "/id/login" in page.url:
+                    logger.warning(f"⚠️ 点击购买后被重定向到登录页面，尝试就地重新登录... ({url})")
+                    auth = EpicAuthorization(page)
+                    if await auth._login():
+                        logger.success("登录成功，重新加载游戏页面并再次尝试领取...")
+                        await page.goto(url, wait_until="load")
+                        await page.wait_for_timeout(2000)
+                        await self._handle_age_gate_and_takeover(page, url)
+
+                        # 关键防御：重新登录后首先检查该游戏是否其实早已在库中！
+                        try:
+                            in_lib_btn = page.locator("button, a[role='button']").filter(
+                                has_text=re.compile(r"^\s*(In Library|已在库中|已在游戏库中)\s*$", re.I)
+                            ).first
+                            with suppress(Exception):
+                                if await in_lib_btn.is_visible():
+                                    logger.success(f"🎉 登录后状态恢复：游戏实测已在库中 (In Library)，跳过领取，避免重复下单误报: {url}")
+                                    skipped_urls.add(url)
+                                    continue
+                        except Exception:
+                            pass
+
+                        try:
+                            retry_btn = page.locator("button, a[role='button']").filter(
+                                has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
+                            ).first
+                            with suppress(Exception):
+                                await retry_btn.wait_for(state="visible", timeout=5000)
+                                if await retry_btn.is_visible():
+                                    agent = AgentV(page=page, agent_config=settings)
+                                    await _click_and_check_modal(retry_btn)
+                                else:
+                                    if await self._verify_library_status(page):
+                                        logger.info(f"ℹ️ 游戏已在库中，跳过后续结账: {url}")
+                                        skipped_urls.add(url)
+                                        continue
+                        except Exception:
+                            pass
+                    else:
+                        logger.error(f"❌ 登录失败，无法领取 {url}")
+                        skipped_urls.add(url)
+                        continue
+
+                # 转入即时结账流程
+                success = await self._handle_instant_checkout(page, agent=agent)
+                if not success:
+                    logger.info(f"Retrying instant checkout for {url}...")
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(2000)
+                        await self._handle_age_gate_and_takeover(page, url)
                         retry_btn = page.locator("button, a[role='button']").filter(
                             has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
                         ).first
                         with suppress(Exception):
                             await retry_btn.wait_for(state="visible", timeout=5000)
                             if await retry_btn.is_visible():
-                                agent = AgentV(page=page, agent_config=settings)
+                                retry_agent = AgentV(page=page, agent_config=settings)
                                 await _click_and_check_modal(retry_btn)
-                            else:
-                                if await self._verify_library_status(page):
-                                    logger.info(f"ℹ️ 游戏已在库中，跳过后续结账: {url}")
-                                    skipped_urls.add(url)
-                                    continue
-                    except Exception:
-                        pass
-                else:
-                    logger.error(f"❌ 登录失败，无法领取 {url}")
-                    skipped_urls.add(url)
-                    continue
+                                success = await self._handle_instant_checkout(page, agent=retry_agent)
+                    except Exception as e:
+                        logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
+                        success = False
 
-            # 转入即时结账流程
-            success = await self._handle_instant_checkout(page, agent=agent)
-            if not success:
-                logger.info(f"Retrying instant checkout for {url}...")
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_timeout(2000)
-                    retry_btn = page.locator("button, a[role='button']").filter(
-                        has_text=re.compile(r"^\s*(Get|GET|获取)\s*$", re.I)
-                    ).first
-                    with suppress(Exception):
-                        await retry_btn.wait_for(state="visible", timeout=5000)
-                        if await retry_btn.is_visible():
-                            retry_agent = AgentV(page=page, agent_config=settings)
-                            await _click_and_check_modal(retry_btn)
-                            success = await self._handle_instant_checkout(page, agent=retry_agent)
-                except Exception as e:
-                    logger.warning(f"Failed to retry checkout, skipping {url}. Error: {e}")
-                    success = False
-
-            if not success:
-                skipped_urls.add(url)  # 领取失败，剔除出待通知列表
-            # ------------------------------------------------------------
+                if not success:
+                    skipped_urls.add(url)  # 领取失败，剔除出待通知列表
+                # ------------------------------------------------------------
+            except Exception as url_err:
+                logger.error(f"❌ 处理商品页异常 ({url}): {url_err}")
+                await self._save_debug_screenshot(page, "error_product_page")
+                skipped_urls.add(url)
+                continue
 
         return has_pending_cart_items, skipped_urls
 
